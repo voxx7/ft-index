@@ -415,6 +415,9 @@ public:
     template<typename omtcmp_t, int (*h)(const omtdata_t &, const omtcmp_t &)>
     int insert(const omtdata_t &value, const omtcmp_t &v, uint32_t *const idx);
 
+    template<typename heaviside_fn>
+    int insert_fast(heaviside_fn h, const omtdata_t &value, uint32_t *const idx);
+
     /**
      * Effect: Increases indexes of all items at slot >= idx by 1.
      *         Insert value into the position at idx.
@@ -590,6 +593,9 @@ public:
              int (*h)(const omtdata_t &, const omtcmp_t &)>
     int find_zero(const omtcmp_t &extra, omtdataout_t *const value, uint32_t *const idxp) const;
 
+    template <typename heaviside_fn>
+    int find_fast_zero(heaviside_fn h, omtdataout_t *const value, uint32_t *const idxp) const;
+
     /**
      *   Effect:
      *    If direction >0 then find the smallest i such that h(V_i,extra)>0.
@@ -653,6 +659,9 @@ public:
     template<typename omtcmp_t,
              int (*h)(const omtdata_t &, const omtcmp_t &)>
     int find(const omtcmp_t &extra, int direction, omtdataout_t *const value, uint32_t *const idxp) const;
+    
+    template<typename heaviside_fn>
+    int find_fast(heaviside_fn h, omtdataout_t *const value, uint32_t *const idxp) const;
 
     /**
      * Effect: Return the size (in bytes) of the omt, as it resides in main memory.  If the data stored are pointers, don't include the size of what they all point to.
@@ -806,6 +815,19 @@ private:
     template<typename omtcmp_t,
              int (*h)(const omtdata_t &, const omtcmp_t &)>
     int find_internal_minus(const subtree &subtree, const omtcmp_t &extra, omtdataout_t *const value, uint32_t *const idxp) const;
+
+    template<typename heaviside_fn>
+    int find_fast_internal(heaviside_fn h, const subtree &subtree, omtdataout_t *const value, uint32_t *const idxp) const;
+
+    template<typename heaviside_fn>
+    int find_fast_internal_array(heaviside_fn h, omtdataout_t *const value, uint32_t *const idxp) const;
+
+    template <typename heaviside_fn>
+    int find_fast_internal_zero(heaviside_fn h, const subtree &subtree, omtdataout_t *const value, uint32_t *const idxp) const;
+
+    template <typename heaviside_fn>
+    int find_fast_internal_zero_array(heaviside_fn h, omtdataout_t *const value, uint32_t *const idxp) const;
+
 };
 
 } // namespace toku

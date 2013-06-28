@@ -2565,7 +2565,7 @@ env_dbremove(DB_ENV * env, DB_TXN *txn, const char *fname, const char *dbname, u
             goto exit;
         }
         // The ft will be unlinked when the txn commits
-        toku_ft_unlink_on_commit(db->i->ft_handle, db_txn_struct_i(txn)->tokutxn);
+        toku_ft_unlink_on_commit(db->i->ft_handle, &db_txn_struct_i(txn)->tokutxn);
     }
     else {
         // unlink the ft without a txn
@@ -2773,7 +2773,7 @@ toku_test_db_redirect_dictionary(DB * db, const char * dname_of_new_file, DB_TXN
     char * new_iname_in_env;
 
     FT_HANDLE brt = db->i->ft_handle;
-    TOKUTXN tokutxn = db_txn_struct_i(dbtxn)->tokutxn;
+    TOKUTXN tokutxn = &db_txn_struct_i(dbtxn)->tokutxn;
 
     toku_fill_dbt(&dname_dbt, dname_of_new_file, strlen(dname_of_new_file)+1);
     toku_init_dbt_flags(&iname_dbt, DB_DBT_REALLOC);

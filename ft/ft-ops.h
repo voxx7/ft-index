@@ -252,6 +252,7 @@ int toku_verify_ft_with_progress (FT_HANDLE brt, int (*progress_callback)(void *
 
 typedef struct ft_cursor *FT_CURSOR;
 int toku_ft_cursor (FT_HANDLE, FT_CURSOR*, TOKUTXN, bool, bool)  __attribute__ ((warn_unused_result));
+int toku_ft_cursor_static (FT_HANDLE, FT_CURSOR, TOKUTXN, bool, bool)  __attribute__ ((warn_unused_result));
 void toku_ft_cursor_set_leaf_mode(FT_CURSOR);
 // Sets a boolean on the brt cursor that prevents uncessary copying of
 // the cursor duing a one query.
@@ -274,8 +275,9 @@ int toku_ft_cursor_get_both_range(FT_CURSOR cursor, DBT *key, DBT *val, FT_GET_C
 int toku_ft_cursor_get_both_range_reverse(FT_CURSOR cursor, DBT *key, DBT *val, FT_GET_CALLBACK_FUNCTION getf, void *getf_v)  __attribute__ ((warn_unused_result));
 
 int toku_ft_cursor_delete(FT_CURSOR cursor, int flags, TOKUTXN)  __attribute__ ((warn_unused_result));
-void toku_ft_cursor_close (FT_CURSOR curs);
-bool toku_ft_cursor_uninitialized(FT_CURSOR c)  __attribute__ ((warn_unused_result));
+void toku_ft_cursor_close (FT_CURSOR cursor);
+void toku_ft_cursor_close_static (FT_CURSOR cursor);
+bool toku_ft_cursor_uninitialized(FT_CURSOR cursor)  __attribute__ ((warn_unused_result));
 
 void toku_ft_cursor_peek(FT_CURSOR cursor, const DBT **pkey, const DBT **pval);
 

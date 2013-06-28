@@ -138,6 +138,16 @@ int toku_txn_begin_with_xid (
     bool for_recovery,
     bool read_only
     );
+int toku_txn_begin_with_xid_static (
+    TOKUTXN parent_tokutxn, 
+    TOKUTXN tokutxn, 
+    TOKULOGGER logger, 
+    TXNID_PAIR xid, 
+    TXN_SNAPSHOT_TYPE snapshot_type,
+    DB_TXN *container_db_txn,
+    bool for_recovery,
+    bool read_only
+    );
 
 void toku_txn_update_xids_in_txn(TOKUTXN txn, TXNID xid);
 
@@ -171,6 +181,7 @@ void toku_txn_complete_txn(TOKUTXN txn);
 
 // Free the memory of a txn
 void toku_txn_destroy_txn(TOKUTXN txn);
+void toku_txn_destroy_txn_static(TOKUTXN txn);
 
 XIDS toku_txn_get_xids (TOKUTXN);
 

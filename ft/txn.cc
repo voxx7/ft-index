@@ -276,163 +276,7 @@ exit:
     return r;
 }
 
-static void
-toku_txn_create_txn_static (
-    TOKUTXN tokutxn, 
-    TOKUTXN parent_tokutxn, 
-    TOKULOGGER logger, 
-    TXN_SNAPSHOT_TYPE snapshot_type,
-    DB_TXN *container_db_txn,
-    bool for_recovery,
-    bool read_only
-    )
-{
-    assert(logger->rollback_cachefile);
-
-    omt<FT> open_fts;
-    open_fts.create_no_array();
-        
-    struct txn_roll_info roll_info = {
-        .num_rollback_nodes = 0,
-        .num_rollentries = 0,
-        .num_rollentries_processed = 0,
-        .rollentry_raw_count = 0,
-        .spilled_rollback_head = ROLLBACK_NONE,
-        .spilled_rollback_head_hash = 0,
-        .spilled_rollback_tail = ROLLBACK_NONE,
-        .spilled_rollback_tail_hash = 0,
-        .current_rollback = ROLLBACK_NONE,
-        .current_rollback_hash = 0,
-    };
-
-static txn_child_manager tcm;
-
-    struct tokutxn new_txn = {
-        .txnid = {.parent_id64 = TXNID_NONE, .child_id64 = TXNID_NONE },
-        .snapshot_txnid64 = TXNID_NONE,
-        .snapshot_type = for_recovery ? TXN_SNAPSHOT_NONE : snapshot_type,
-        .for_recovery = for_recovery,
-        .logger = logger,
-        .parent = parent_tokutxn,
-        .child = NULL,
-        .child_manager_s = tcm,
-        .child_manager = NULL,
-        .container_db_txn = container_db_txn,
-        .live_root_txn_list = nullptr,
-        .xids = NULL,
-        .oldest_referenced_xid = TXNID_NONE,
-        .snapshot_next = TXNID_NONE,
-        .snapshot_prev = TXNID_NONE,
-        .begin_was_logged = false,
-        .declared_read_only = read_only,
-        .do_fsync = false,
-        .force_fsync_on_commit = false,
-        .do_fsync_lsn = ZERO_LSN,
-        .xa_xid = {-1},
-        .progress_poll_fun = NULL,
-        .progress_poll_fun_extra = NULL,
-        .txn_lock = ZERO_MUTEX_INITIALIZER,
-        .open_fts = open_fts,
-        .roll_info = roll_info,
-        .state_lock = ZERO_MUTEX_INITIALIZER,
-        .state_cond = ZERO_COND_INITIALIZER,
-        .state = TOKUTXN_LIVE,
-        .num_pin = 0
-    };
-
-    invalidate_xa_xid(&new_txn.xa_xid);
-    memcpy(tokutxn, &new_txn, sizeof(struct tokutxn));
-    if (parent_tokutxn == NULL) {
-        tokutxn->child_manager = &tokutxn->child_manager_s;
-        tokutxn->child_manager->init(tokutxn);
-    }
-    else {
-        tokutxn->child_manager = parent_tokutxn->child_manager;
-    }
-
-    toku_mutex_init(&tokutxn->txn_lock, nullptr);
-
-    toku_pthread_mutexattr_t attr;
-    toku_mutexattr_init(&attr);
-    toku_mutexattr_settype(&attr, TOKU_MUTEX_ADAPTIVE);
-    toku_mutex_init(&tokutxn->state_lock, &attr);
-    toku_mutexattr_destroy(&attr);
-
-    toku_cond_init(&tokutxn->state_cond, nullptr);
-
-    STATUS_INC(TXN_BEGIN, 1);
-}
-
-int 
-toku_txn_begin_with_xid_static (
-    TOKUTXN parent, 
-    TOKUTXN txn, 
-    TOKULOGGER logger, 
-    TXNID_PAIR xid, 
-    TXN_SNAPSHOT_TYPE snapshot_type,
-    DB_TXN *container_db_txn,
-    bool for_recovery,
-    bool read_only
-    ) 
-{   
-    int r = 0;
-    // check for case where we are trying to 
-    // create too many nested transactions
-    if (!read_only && parent && !xids_can_create_child(parent->xids)) {
-        r = EINVAL;
-        goto exit;
-    }
-    if (read_only && parent) {
-        invariant(txn_declared_read_only(parent));
-    }
-    toku_txn_create_txn_static(txn, parent, logger, snapshot_type, container_db_txn, for_recovery, read_only);
-    // txnid64, snapshot_txnid64 
-    // will be set in here.
-    if (for_recovery) {
-        if (parent == NULL) {
-            invariant(xid.child_id64 == TXNID_NONE);
-            toku_txn_manager_start_txn_for_recovery(
-                txn,
-                logger->txn_manager,
-                xid.parent_id64
-                );
-        }
-        else {
-            parent->child_manager->start_child_txn_for_recovery(txn, parent, xid);
-            txn->oldest_referenced_xid = parent->oldest_referenced_xid;
-        }
-    }
-    else {
-        assert(xid.parent_id64 == TXNID_NONE);
-        assert(xid.child_id64 == TXNID_NONE);
-        if (parent == NULL) {
-            toku_txn_manager_start_txn(
-                txn, 
-                logger->txn_manager, 
-                snapshot_type,
-                read_only
-                );
-        }
-        else {
-            parent->child_manager->start_child_txn(txn, parent);
-            txn->oldest_referenced_xid = parent->oldest_referenced_xid;
-            toku_txn_manager_handle_snapshot_create_for_child_txn(
-                txn, 
-                logger->txn_manager, 
-                snapshot_type
-                );
-        }
-    }
-    if (!read_only) {
-        // this call will set txn->xids
-        txn_create_xids(txn, parent);
-    }
-exit:
-    return r;
-}
-
-DB_TXN *
-toku_txn_get_container_db_txn (TOKUTXN tokutxn) {
+DB_TXN *toku_txn_get_container_db_txn (TOKUTXN tokutxn) {
     DB_TXN * container = tokutxn->container_db_txn;
     return container;
 }
@@ -469,8 +313,7 @@ static void toku_txn_create_txn (
         .current_rollback_hash = 0,
     };
 
-static txn_child_manager tcm;
-
+    static txn_child_manager tcm;
     struct tokutxn new_txn = {
         .txnid = {.parent_id64 = TXNID_NONE, .child_id64 = TXNID_NONE },
         .snapshot_txnid64 = TXNID_NONE,
@@ -822,16 +665,6 @@ void toku_txn_destroy_txn(TOKUTXN txn) {
     toku_mutex_destroy(&txn->state_lock);
     toku_cond_destroy(&txn->state_cond);
     toku_free(txn);
-}
-
-void toku_txn_destroy_txn_static(TOKUTXN txn) {
-    txn->open_fts.destroy();
-    if (txn->xids) {
-        xids_destroy(&txn->xids);
-    }
-    toku_mutex_destroy(&txn->txn_lock);
-    toku_mutex_destroy(&txn->state_lock);
-    toku_cond_destroy(&txn->state_cond);
 }
 
 XIDS toku_txn_get_xids (TOKUTXN txn) {

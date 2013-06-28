@@ -563,16 +563,16 @@ toku_txn_begin(DB_ENV *env, DB_TXN * stxn, DB_TXN ** txn, uint32_t flags) {
             break;
         }
     }
-    const int r = toku_txn_begin_with_xid(
-                  stxn ? db_txn_struct_i(stxn)->tokutxn : 0,
-                  &db_txn_struct_i(result)->tokutxn,
-                  env->i->logger,
-                  TXNID_PAIR_NONE,
-                  snapshot_type,
-                  result,
-                  false, // for_recovery
-                  txn_declared_read_only // read_only
-                  );
+    int r = toku_txn_begin_with_xid(
+        stxn ? db_txn_struct_i(stxn)->tokutxn : 0,
+        &db_txn_struct_i(result)->tokutxn,
+        env->i->logger,
+        TXNID_PAIR_NONE,
+        snapshot_type,
+        result,
+        false, // for_recovery
+        txn_declared_read_only // read_only
+        );
     if (r != 0) {
         toku_free(result);
         return r;
@@ -587,7 +587,7 @@ toku_txn_begin(DB_ENV *env, DB_TXN * stxn, DB_TXN ** txn, uint32_t flags) {
     toku_mutex_init(&db_txn_struct_i(result)->txn_mutex, NULL);
 
     *txn = result;
-    return r;
+    return 0;
 }
 
 void toku_keep_prepared_txn_callback (DB_ENV *env, TOKUTXN tokutxn) {

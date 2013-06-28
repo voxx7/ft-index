@@ -6079,7 +6079,7 @@ static int get_key_after_bytes_in_child(FT_HANDLE ft_h, FT ft, FTNODE node, UNLO
     uint32_t fullhash = compute_child_fullhash(ft->cf, node, childnum);
     FTNODE child;
     bool msgs_applied = false;
-    r = toku_pin_ftnode_batched(ft_h, childblocknum, fullhash, unlockers, &next_ancestors, bounds, bfe, PL_READ, false, &child, &msgs_applied);
+    r = toku_pin_ftnode_batched(ft_h, childblocknum, fullhash, unlockers, &next_ancestors, bounds, bfe, false, &child, &msgs_applied);
     paranoid_invariant(!msgs_applied);
     if (r == TOKUDB_TRY_AGAIN) {
         return r;

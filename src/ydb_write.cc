@@ -239,7 +239,7 @@ toku_db_del(DB *db, DB_TXN *txn, DBT *key, uint32_t flags, bool holds_mo_lock) {
     if (r == 0) {
         //Do the actual deleting.
         if (!holds_mo_lock) toku_multi_operation_client_lock();
-        toku_ft_delete(db->i->ft_handle, key, txn ? &db_txn_struct_i(txn)->tokutxn : 0);
+        toku_ft_delete(db->i->ft_handle, key, txn ? db_txn_struct_i(txn)->tokutxn : 0);
         if (!holds_mo_lock) toku_multi_operation_client_unlock();
     }
 
@@ -276,7 +276,7 @@ toku_db_put(DB *db, DB_TXN *txn, DBT *key, DBT *val, uint32_t flags, bool holds_
     }
     if (r == 0) {
         //Insert into the brt.
-        TOKUTXN ttxn = txn ? &db_txn_struct_i(txn)->tokutxn : NULL;
+        TOKUTXN ttxn = txn ? db_txn_struct_i(txn)->tokutxn : NULL;
         enum ft_msg_type type = FT_INSERT;
         if (flags==DB_NOOVERWRITE_NO_ERROR) {
             type = FT_INSERT_NO_OVERWRITE;
@@ -322,7 +322,7 @@ toku_db_update(DB *db, DB_TXN *txn,
     }
 
     TOKUTXN ttxn;
-    ttxn = txn ? &db_txn_struct_i(txn)->tokutxn : NULL;
+    ttxn = txn ? db_txn_struct_i(txn)->tokutxn : NULL;
     toku_multi_operation_client_lock();
     toku_ft_maybe_update(db->i->ft_handle, key, update_function_extra, ttxn,
                               false, ZERO_LSN, true);
@@ -380,7 +380,7 @@ toku_db_update_broadcast(DB *db, DB_TXN *txn,
     }
 
     TOKUTXN ttxn;
-    ttxn = txn ? &db_txn_struct_i(txn)->tokutxn : NULL;
+    ttxn = txn ? db_txn_struct_i(txn)->tokutxn : NULL;
     toku_multi_operation_client_lock();
     toku_ft_maybe_update_broadcast(db->i->ft_handle, update_function_extra, ttxn,
                                         false, ZERO_LSN, true, is_resetting_op);
@@ -396,7 +396,7 @@ cleanup:
 
 static void
 log_del_single(DB_TXN *txn, FT_HANDLE brt, const DBT *key) {
-    TOKUTXN ttxn = &db_txn_struct_i(txn)->tokutxn;
+    TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
     toku_ft_log_del(ttxn, brt, key);
 }
 
@@ -411,7 +411,7 @@ sum_size(uint32_t num_keys, DBT keys[], uint32_t overhead) {
 static void
 log_del_multiple(DB_TXN *txn, DB *src_db, const DBT *key, const DBT *val, uint32_t num_dbs, FT_HANDLE brts[], DBT keys[]) {
     if (num_dbs > 0) {
-        TOKUTXN ttxn = &db_txn_struct_i(txn)->tokutxn;
+        TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
         FT_HANDLE src_ft  = src_db ? src_db->i->ft_handle : NULL;
         uint32_t del_multiple_size = key->size + val->size + num_dbs*sizeof (uint32_t) + toku_log_enq_delete_multiple_overhead;
         uint32_t del_single_sizes = sum_size(num_dbs, keys, toku_log_enq_delete_any_overhead);
@@ -437,7 +437,7 @@ lookup_src_db(uint32_t num_dbs, DB *db_array[], DB *src_db) {
 static int
 do_del_multiple(DB_TXN *txn, uint32_t num_dbs, DB *db_array[], DBT keys[], DB *src_db, const DBT *src_key) {
     int r = 0;
-    TOKUTXN ttxn = &db_txn_struct_i(txn)->tokutxn;
+    TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
     for (uint32_t which_db = 0; r == 0 && which_db < num_dbs; which_db++) {
         DB *db = db_array[which_db];
 
@@ -597,14 +597,14 @@ cleanup:
 
 static void
 log_put_single(DB_TXN *txn, FT_HANDLE brt, const DBT *key, const DBT *val) {
-    TOKUTXN ttxn = &db_txn_struct_i(txn)->tokutxn;
+    TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
     toku_ft_log_put(ttxn, brt, key, val);
 }
 
 static void
 log_put_multiple(DB_TXN *txn, DB *src_db, const DBT *src_key, const DBT *src_val, uint32_t num_dbs, FT_HANDLE brts[]) {
     if (num_dbs > 0) {
-        TOKUTXN ttxn = &db_txn_struct_i(txn)->tokutxn;
+        TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
         FT_HANDLE src_ft  = src_db ? src_db->i->ft_handle : NULL;
         toku_ft_log_put_multiple(ttxn, src_ft, brts, num_dbs, src_key, src_val);
     }
@@ -613,7 +613,7 @@ log_put_multiple(DB_TXN *txn, DB *src_db, const DBT *src_key, const DBT *src_val
 static int
 do_put_multiple(DB_TXN *txn, uint32_t num_dbs, DB *db_array[], DBT keys[], DBT vals[], DB *src_db, const DBT *src_key) {
     int r = 0;
-    TOKUTXN ttxn = &db_txn_struct_i(txn)->tokutxn;
+    TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
     for (uint32_t which_db = 0; r == 0 && which_db < num_dbs; which_db++) {
         DB *db = db_array[which_db];
 

@@ -98,9 +98,8 @@ PATENT RIGHTS GRANT:
 #include <ft/minicron.h>
 // TODO: remove vanilla omt in favor of templated one
 #include <ft/omt.h>
-
+// TODO: The ft_cursor definition shouldn't be in the internal header.
 #include <ft/ft-internal.h>
-#include <ft/log-internal.h>
 
 #include <util/growable_array.h>
 #include <util/omt.h>
@@ -254,7 +253,7 @@ struct txn_lt_key_ranges {
 };
 
 struct __toku_db_txn_internal {
-    struct tokutxn tokutxn;
+    struct tokutxn *tokutxn;
     uint32_t flags;
     TOKU_ISOLATION iso;
     DB_TXN *child;

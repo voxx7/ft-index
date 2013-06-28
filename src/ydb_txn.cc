@@ -104,7 +104,7 @@ PATENT RIGHTS GRANT:
 static uint64_t 
 toku_txn_id64(DB_TXN * txn) {
     HANDLE_PANICKED_ENV(txn->mgrp);
-    return toku_txn_get_root_id(&db_txn_struct_i(txn)->tokutxn);
+    return toku_txn_get_root_id(db_txn_struct_i(txn)->tokutxn);
 }
 
 static void 
@@ -128,7 +128,7 @@ toku_txn_release_locks(DB_TXN *txn) {
 static void
 toku_txn_destroy(DB_TXN *txn) {
     db_txn_struct_i(txn)->lt_map.destroy();
-    toku_txn_destroy_txn_static(&db_txn_struct_i(txn)->tokutxn);
+    toku_txn_destroy_txn(db_txn_struct_i(txn)->tokutxn);
     toku_mutex_destroy(&db_txn_struct_i(txn)->txn_mutex);
     toku_free(txn);
 }
@@ -155,7 +155,7 @@ toku_txn_commit(DB_TXN * txn, uint32_t flags,
         db_txn_struct_i(txn->parent)->child=NULL;
     }
     if (flags & DB_TXN_SYNC) {
-        toku_txn_force_fsync_on_commit(&db_txn_struct_i(txn)->tokutxn);
+        toku_txn_force_fsync_on_commit(db_txn_struct_i(txn)->tokutxn);
         flags &= ~DB_TXN_SYNC;
     }
     int nosync = (flags & DB_TXN_NOSYNC)!=0 || (db_txn_struct_i(txn)->flags&DB_TXN_NOSYNC);
@@ -164,10 +164,10 @@ toku_txn_commit(DB_TXN * txn, uint32_t flags,
     int r;
     if (flags!=0) {
         // frees the tokutxn
-        r = toku_txn_abort_txn(&db_txn_struct_i(txn)->tokutxn, poll, poll_extra);
+        r = toku_txn_abort_txn(db_txn_struct_i(txn)->tokutxn, poll, poll_extra);
     } else {
         // frees the tokutxn
-        r = toku_txn_commit_txn(&db_txn_struct_i(txn)->tokutxn, nosync,
+        r = toku_txn_commit_txn(db_txn_struct_i(txn)->tokutxn, nosync,
                                 poll, poll_extra);
     }
     if (r!=0 && !toku_env_is_panicked(txn->mgrp)) {
@@ -177,7 +177,7 @@ toku_txn_commit(DB_TXN * txn, uint32_t flags,
     HANDLE_PANICKED_ENV(txn->mgrp);
     assert_zero(r);
 
-    TOKUTXN ttxn = &db_txn_struct_i(txn)->tokutxn;
+    TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
     TOKULOGGER logger = txn->mgrp->i->logger;
     LSN do_fsync_lsn;
     bool do_fsync;
@@ -232,13 +232,13 @@ toku_txn_abort(DB_TXN * txn,
         db_txn_struct_i(txn->parent)->child=NULL;
     }
 
-    int r = toku_txn_abort_txn(&db_txn_struct_i(txn)->tokutxn, poll, poll_extra);
+    int r = toku_txn_abort_txn(db_txn_struct_i(txn)->tokutxn, poll, poll_extra);
     if (r!=0 && !toku_env_is_panicked(txn->mgrp)) {
         env_panic(txn->mgrp, r, "Error during abort.\n");
     }
     HANDLE_PANICKED_ENV(txn->mgrp);
     assert_zero(r);
-    toku_txn_complete_txn(&db_txn_struct_i(txn)->tokutxn);
+    toku_txn_complete_txn(db_txn_struct_i(txn)->tokutxn);
     toku_txn_release_locks(txn);
     toku_txn_destroy(txn);
     return r;
@@ -259,7 +259,7 @@ toku_txn_xa_prepare (DB_TXN *txn, TOKU_XA_XID *xid) {
     // Take the mo lock as soon as a non-readonly txn is found
     bool holds_mo_lock;
     holds_mo_lock = false;
-    if (!toku_txn_is_read_only(&db_txn_struct_i(txn)->tokutxn)) {
+    if (!toku_txn_is_read_only(db_txn_struct_i(txn)->tokutxn)) {
         // A readonly transaction does no logging, and therefore does not
         // need the MO lock.
         toku_multi_operation_client_lock();
@@ -279,7 +279,7 @@ toku_txn_xa_prepare (DB_TXN *txn, TOKU_XA_XID *xid) {
     }
     assert(!db_txn_struct_i(txn)->child);
     TOKUTXN ttxn;
-    ttxn = &db_txn_struct_i(txn)->tokutxn;
+    ttxn = db_txn_struct_i(txn)->tokutxn;
     toku_txn_prepare_txn(ttxn, xid);
     TOKULOGGER logger;
     logger = txn->mgrp->i->logger;
@@ -311,7 +311,7 @@ toku_txn_prepare (DB_TXN *txn, uint8_t gid[DB_GID_SIZE]) {
 static int
 toku_txn_txn_stat (DB_TXN *txn, struct txn_stat **txn_stat) {
     XMALLOC(*txn_stat);
-    return toku_logger_txn_rollback_stats(&db_txn_struct_i(txn)->tokutxn, *txn_stat);
+    return toku_logger_txn_rollback_stats(db_txn_struct_i(txn)->tokutxn, *txn_stat);
 }
 
 static int
@@ -324,7 +324,7 @@ static int
 locked_txn_commit_with_progress(DB_TXN *txn, uint32_t flags,
                                 TXN_PROGRESS_POLL_FUNCTION poll, void* poll_extra) {
     bool holds_mo_lock = false;
-    if (!toku_txn_is_read_only(&db_txn_struct_i(txn)->tokutxn)) {
+    if (!toku_txn_is_read_only(db_txn_struct_i(txn)->tokutxn)) {
         // A readonly transaction does no logging, and therefore does not
         // need the MO lock.
         toku_multi_operation_client_lock();
@@ -347,7 +347,7 @@ locked_txn_abort_with_progress(DB_TXN *txn,
     // see a non-readonly txn in the abort (or recursive commit).
     // But released here so we don't have to hold additional state.
     bool holds_mo_lock = false;
-    if (!toku_txn_is_read_only(&db_txn_struct_i(txn)->tokutxn)) {
+    if (!toku_txn_is_read_only(db_txn_struct_i(txn)->tokutxn)) {
         // A readonly transaction does no logging, and therefore does not
         // need the MO lock.
         toku_multi_operation_client_lock();
@@ -541,16 +541,16 @@ toku_txn_begin(DB_ENV *env, DB_TXN * stxn, DB_TXN ** txn, uint32_t flags) {
             break;
         }
     }
-    int r = toku_txn_begin_with_xid_static(
-        stxn ? &db_txn_struct_i(stxn)->tokutxn : 0,
-        &db_txn_struct_i(result)->tokutxn,
-        env->i->logger,
-        TXNID_PAIR_NONE,
-        snapshot_type,
-        result,
-        false, // for_recovery
-        txn_declared_read_only // read_only
-        );
+    const int r = toku_txn_begin_with_xid(
+                  stxn ? db_txn_struct_i(stxn)->tokutxn : 0,
+                  &db_txn_struct_i(result)->tokutxn,
+                  env->i->logger,
+                  TXNID_PAIR_NONE,
+                  snapshot_type,
+                  result,
+                  false, // for_recovery
+                  txn_declared_read_only // read_only
+                  );
     if (r != 0) {
         toku_free(result);
         return r;
@@ -565,7 +565,7 @@ toku_txn_begin(DB_ENV *env, DB_TXN * stxn, DB_TXN ** txn, uint32_t flags) {
     toku_mutex_init(&db_txn_struct_i(result)->txn_mutex, NULL);
 
     *txn = result;
-    return 0;
+    return r;
 }
 
 void toku_keep_prepared_txn_callback (DB_ENV *env, TOKUTXN tokutxn) {
@@ -576,10 +576,8 @@ void toku_keep_prepared_txn_callback (DB_ENV *env, TOKUTXN tokutxn) {
     
     result->parent = NULL;
 
-    abort();
-    (void) tokutxn;
-    //db_txn_struct_i(result)->tokutxn = *tokutxn;
-    //db_txn_struct_i(result)->lt_map.create();
+    db_txn_struct_i(result)->tokutxn = tokutxn;
+    db_txn_struct_i(result)->lt_map.create();
 
     toku_txn_set_container_db_txn(tokutxn, result);
 

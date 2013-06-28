@@ -843,7 +843,7 @@ toku_db_cursor_internal(DB * db, DB_TXN * txn, DBC ** c, uint32_t flags, int is_
     r = toku_ft_cursor_static(
         db->i->ft_handle, 
         &dbc_struct_i(result)->c,
-        txn ? &db_txn_struct_i(txn)->tokutxn : NULL,
+        txn ? db_txn_struct_i(txn)->tokutxn : NULL,
         is_snapshot_read,
         ((flags & DBC_DISABLE_PREFETCHING) != 0)
         );

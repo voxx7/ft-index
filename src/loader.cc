@@ -218,7 +218,7 @@ static int ft_loader_close_and_redirect(DB_LOADER *loader) {
             toku_multi_operation_client_lock(); //Must hold MO lock for dictionary_redirect.
             r = toku_dictionary_redirect(loader->i->inames_in_env[i],
                                          loader->i->dbs[i]->i->ft_handle,
-                                         &db_txn_struct_i(loader->i->txn)->tokutxn);
+                                         db_txn_struct_i(loader->i->txn)->tokutxn);
             toku_multi_operation_client_unlock();
             if ( r!=0 ) break;
         }
@@ -316,7 +316,7 @@ toku_loader_create_loader(DB_ENV *env,
             toku_free(brts);
             goto create_exit;
         }
-        TOKUTXN ttxn = txn ? &db_txn_struct_i(txn)->tokutxn : NULL;
+        TOKUTXN ttxn = txn ? db_txn_struct_i(txn)->tokutxn : NULL;
         rval = toku_ft_loader_open(&loader->i->ft_loader,
                                  loader->i->env->i->cachetable,
                                  loader->i->env->i->generate_row_for_put,

@@ -213,7 +213,7 @@ toku_pin_ftnode_batched(
 {
     void *node_v;
     *msgs_applied = false;
-    FTNODE node = NULL;
+    FTNODE node = nullptr;
     MSN max_msn_in_path = ZERO_MSN;
     bool needs_ancestors_messages = false;
     // this function assumes that if you want ancestor messages applied,

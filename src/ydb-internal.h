@@ -98,8 +98,6 @@ PATENT RIGHTS GRANT:
 #include <ft/minicron.h>
 // TODO: remove vanilla omt in favor of templated one
 #include <ft/omt.h>
-// TODO: The ft_cursor definition shouldn't be in the internal header.
-#include <ft/ft-internal.h>
 
 #include <util/growable_array.h>
 #include <util/omt.h>
@@ -272,7 +270,7 @@ struct __toku_db_txn_external {
 #define db_txn_struct_i(x) (&((struct __toku_db_txn_external *)x)->internal_part)
 
 struct __toku_dbc_internal {
-    struct ft_cursor c;
+    struct ft_cursor *c;
     DB_TXN *txn;
     TOKU_ISOLATION iso;
     struct simple_dbt skey_s,sval_s;

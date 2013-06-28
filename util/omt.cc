@@ -265,6 +265,25 @@ int omt<omtdata_t, omtdataout_t, supports_marks>::insert(const omtdata_t &value,
     return 0;
 }
 
+template<typename omtdata_t, typename omtdataout_t, bool supports_marks>
+template <typename heaviside_fn>
+int omt<omtdata_t, omtdataout_t, supports_marks>::insert_fast(heaviside_fn h, const omtdata_t &value, uint32_t *const idx) {
+    int r;
+    uint32_t insert_idx;
+
+    r = this->find_fast_zero<heaviside_fn>(h, nullptr, &insert_idx);
+    if (r==0) {
+        if (idx) *idx = insert_idx;
+        return DB_KEYEXIST;
+    }
+    if (r != DB_NOTFOUND) return r;
+
+    if ((r = this->insert_at(value, insert_idx))) return r;
+    if (idx) *idx = insert_idx;
+
+    return 0;
+}
+
 // The following 3 functions implement a static if for us.
 template<typename omtdata_t, typename omtdataout_t>
 static void barf_if_marked(const omt<omtdata_t, omtdataout_t, false> &UU(omt)) {
@@ -504,6 +523,21 @@ int omt<omtdata_t, omtdataout_t, supports_marks>::find_zero(const omtcmp_t &extr
 }
 
 template<typename omtdata_t, typename omtdataout_t, bool supports_marks>
+template <typename heaviside_fn>
+int omt<omtdata_t, omtdataout_t, supports_marks>::find_fast_zero(heaviside_fn h, omtdataout_t *const value, uint32_t *const idxp) const {
+    uint32_t tmp_index;
+    uint32_t *const child_idxp = (idxp != nullptr) ? idxp : &tmp_index;
+    int r;
+    if (this->is_array) {
+        r = this->find_fast_internal_zero_array<heaviside_fn>(h, value, child_idxp);
+    }
+    else {
+        r = this->find_fast_internal_zero<heaviside_fn>(h, this->d.t.root, value, child_idxp);
+    }
+    return r;
+}
+
+template<typename omtdata_t, typename omtdataout_t, bool supports_marks>
 template<typename omtcmp_t,
          int (*h)(const omtdata_t &, const omtcmp_t &)>
 int omt<omtdata_t, omtdataout_t, supports_marks>::find(const omtcmp_t &extra, int direction, omtdataout_t *const value, uint32_t *const idxp) const {
@@ -522,6 +556,70 @@ int omt<omtdata_t, omtdataout_t, supports_marks>::find(const omtcmp_t &extra, in
         } else {
             return this->find_internal_plus<omtcmp_t, h>(this->d.t.root, extra, value, child_idxp);
         }
+    }
+}
+
+template<typename omtdata_t, typename omtdataout_t, bool supports_marks>
+template<typename heaviside_fn>
+int omt<omtdata_t, omtdataout_t, supports_marks>::find_fast_internal(heaviside_fn h, const subtree &subtree, omtdataout_t *const value, uint32_t *const idxp) const {
+    paranoid_invariant_notnull(idxp);
+    if (subtree.is_null()) {
+        return DB_NOTFOUND;
+    }
+    omt_node *const n = &this->d.t.nodes[subtree.get_index()];
+    int hv = h(n->value);
+    int r;
+    if (hv > 0) {
+        r = this->find_fast_internal<heaviside_fn>(h, n->left, value, idxp);
+        if (r == DB_NOTFOUND) {
+            *idxp = this->nweight(n->left);
+            if (value != nullptr) {
+                copyout(value, n);
+            }
+            r = 0;
+        }
+    } else {
+        r = this->find_fast_internal<heaviside_fn>(h, n->right, value, idxp);
+        if (r == 0) {
+            *idxp += this->nweight(n->left) + 1;
+        }
+    }
+    return r;
+}
+
+template<typename omtdata_t, typename omtdataout_t, bool supports_marks>
+template<typename heaviside_fn>
+int omt<omtdata_t, omtdataout_t, supports_marks>::find_fast_internal_array(heaviside_fn h, omtdataout_t *const value, uint32_t *const idxp) const {
+    paranoid_invariant_notnull(idxp);
+    uint32_t min = this->d.a.start_idx;
+    uint32_t limit = this->d.a.start_idx + this->d.a.num_values;
+    uint32_t best = subtree::NODE_NULL;
+
+    while (min != limit) {
+        const uint32_t mid = (min + limit) / 2;
+        const int hv = h(this->d.a.values[mid]);
+        if (hv > 0) {
+            best = mid;
+            limit = mid;
+        } else {
+            min = mid + 1;
+        }
+    }
+    if (best == subtree::NODE_NULL) { return DB_NOTFOUND; }
+    if (value != nullptr) {
+        copyout(value, &this->d.a.values[best]);
+    }
+    *idxp = best - this->d.a.start_idx;
+    return 0;
+}
+
+template<typename omtdata_t, typename omtdataout_t, bool supports_marks>
+template<typename heaviside_fn>
+int omt<omtdata_t, omtdataout_t, supports_marks>::find_fast(heaviside_fn h, omtdataout_t *const value, uint32_t *const idxp) const {
+    if (this->is_array) {
+        return this->find_fast_internal_array(h, value, idxp);
+    } else {
+        return this->find_fast_internal(h, this->d.t.root, value, idxp);
     }
 }
 
@@ -1044,6 +1142,43 @@ int omt<omtdata_t, omtdataout_t, supports_marks>::find_internal_zero_array(const
 }
 
 template<typename omtdata_t, typename omtdataout_t, bool supports_marks>
+template <typename heaviside_fn>
+int omt<omtdata_t, omtdataout_t, supports_marks>::find_fast_internal_zero_array(heaviside_fn h, omtdataout_t *const value, uint32_t *const idxp) const {
+    paranoid_invariant_notnull(idxp);
+    uint32_t min = this->d.a.start_idx;
+    uint32_t limit = this->d.a.start_idx + this->d.a.num_values;
+    uint32_t best_pos = subtree::NODE_NULL;
+    uint32_t best_zero = subtree::NODE_NULL;
+
+    while (min!=limit) {
+        uint32_t mid = (min + limit) / 2;
+        int hv = h(this->d.a.values[mid]);
+        if (hv<0) {
+            min = mid+1;
+        }
+        else if (hv>0) {
+            best_pos  = mid;
+            limit     = mid;
+        }
+        else {
+            best_zero = mid;
+            limit     = mid;
+        }
+    }
+    if (best_zero!=subtree::NODE_NULL) {
+        //Found a zero
+        if (value != nullptr) {
+            copyout(value, &this->d.a.values[best_zero]);
+        }
+        *idxp = best_zero - this->d.a.start_idx;
+        return 0;
+    }
+    if (best_pos!=subtree::NODE_NULL) *idxp = best_pos - this->d.a.start_idx;
+    else                     *idxp = this->d.a.num_values;
+    return DB_NOTFOUND;
+}
+
+template<typename omtdata_t, typename omtdataout_t, bool supports_marks>
 template<typename omtcmp_t,
          int (*h)(const omtdata_t &, const omtcmp_t &)>
 int omt<omtdata_t, omtdataout_t, supports_marks>::find_internal_zero(const subtree &subtree, const omtcmp_t &extra, omtdataout_t *const value, uint32_t *const idxp) const {
@@ -1062,6 +1197,35 @@ int omt<omtdata_t, omtdataout_t, supports_marks>::find_internal_zero(const subtr
         return this->find_internal_zero<omtcmp_t, h>(n.left, extra, value, idxp);
     } else {
         int r = this->find_internal_zero<omtcmp_t, h>(n.left, extra, value, idxp);
+        if (r==DB_NOTFOUND) {
+            *idxp = this->nweight(n.left);
+            if (value != nullptr) {
+                copyout(value, &n);
+            }
+            r = 0;
+        }
+        return r;
+    }
+}
+
+template<typename omtdata_t, typename omtdataout_t, bool supports_marks>
+template <typename heaviside_fn>
+int omt<omtdata_t, omtdataout_t, supports_marks>::find_fast_internal_zero(heaviside_fn h, const subtree &subtree, omtdataout_t *const value, uint32_t *const idxp) const {
+    paranoid_invariant_notnull(idxp);
+    if (subtree.is_null()) {
+        *idxp = 0;
+        return DB_NOTFOUND;
+    }
+    omt_node &n = this->d.t.nodes[subtree.get_index()];
+    int hv = h(n.value);
+    if (hv<0) {
+        int r = this->find_fast_internal_zero<heaviside_fn>(h, n.right, value, idxp);
+        *idxp += this->nweight(n.left)+1;
+        return r;
+    } else if (hv>0) {
+        return this->find_fast_internal_zero<heaviside_fn>(h, n.left, value, idxp);
+    } else {
+        int r = this->find_fast_internal_zero<heaviside_fn>(h, n.left, value, idxp);
         if (r==DB_NOTFOUND) {
             *idxp = this->nweight(n.left);
             if (value != nullptr) {

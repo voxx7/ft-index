@@ -292,13 +292,13 @@ toku_indexer_create_indexer(DB_ENV *env,
     }
 
     // create and initialize the leafentry cursor
-    rval = toku_le_cursor_create(&indexer->i->lec, db_struct_i(src_db)->ft_handle, db_txn_struct_i(txn)->tokutxn);
+    rval = toku_le_cursor_create(&indexer->i->lec, db_struct_i(src_db)->ft_handle, &db_txn_struct_i(txn)->tokutxn);
     if ( !indexer->i->lec ) { goto create_exit; }
 
     // 2954: add recovery and rollback entries
     LSN hot_index_lsn; // not used (yet)
     TOKUTXN      ttxn;
-    ttxn = db_txn_struct_i(txn)->tokutxn;
+    ttxn = &db_txn_struct_i(txn)->tokutxn;
     FILENUMS filenums;
     filenums = indexer->i->filenums;
     toku_multi_operation_client_lock();

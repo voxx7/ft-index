@@ -99,6 +99,9 @@ PATENT RIGHTS GRANT:
 // TODO: remove vanilla omt in favor of templated one
 #include <ft/omt.h>
 
+#include <ft/ft-internal.h>
+#include <ft/log-internal.h>
+
 #include <util/growable_array.h>
 #include <util/omt.h>
 
@@ -251,7 +254,7 @@ struct txn_lt_key_ranges {
 };
 
 struct __toku_db_txn_internal {
-    struct tokutxn *tokutxn;
+    struct tokutxn tokutxn;
     uint32_t flags;
     TOKU_ISOLATION iso;
     DB_TXN *child;
@@ -270,7 +273,7 @@ struct __toku_db_txn_external {
 #define db_txn_struct_i(x) (&((struct __toku_db_txn_external *)x)->internal_part)
 
 struct __toku_dbc_internal {
-    struct ft_cursor *c;
+    struct ft_cursor c;
     DB_TXN *txn;
     TOKU_ISOLATION iso;
     struct simple_dbt skey_s,sval_s;

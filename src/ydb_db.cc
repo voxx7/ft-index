@@ -351,8 +351,8 @@ toku_db_open(DB * db, DB_TXN * txn, const char *fname, const char *dbname, DBTYP
         uint64_t id2 = 0;
 
         if (txn) {
-            id1 = toku_txn_get_txnid(db_txn_struct_i(txn)->tokutxn).parent_id64;
-            id2 = toku_txn_get_txnid(db_txn_struct_i(txn)->tokutxn).child_id64;
+            id1 = toku_txn_get_txnid(&db_txn_struct_i(txn)->tokutxn).parent_id64;
+            id2 = toku_txn_get_txnid(&db_txn_struct_i(txn)->tokutxn).child_id64;
         } else {
             id1 = toku_sync_fetch_and_add(&nontransactional_open_id, 1);
         }
@@ -408,7 +408,7 @@ db_on_redirect_callback(FT_HANDLE ft_handle, void* extra) {
 int toku_db_lt_on_create_callback(toku::locktree *lt, void *extra) {
     int r;
     struct lt_on_create_callback_extra *info = (struct lt_on_create_callback_extra *) extra;
-    TOKUTXN ttxn = info->txn ? db_txn_struct_i(info->txn)->tokutxn : NULL;
+    TOKUTXN ttxn = info->txn ? &db_txn_struct_i(info->txn)->tokutxn : NULL;
     FT_HANDLE ft_handle = info->ft_handle;
 
     FT_HANDLE cloned_ft_handle;
@@ -472,7 +472,7 @@ toku_db_open_iname(DB * db, DB_TXN * txn, const char *iname_in_env, uint32_t fla
     int r = toku_ft_handle_open(ft_handle, iname_in_env,
                       is_db_create, is_db_excl,
                       db->dbenv->i->cachetable,
-                      txn ? db_txn_struct_i(txn)->tokutxn : NULL_TXN);
+                      txn ? &db_txn_struct_i(txn)->tokutxn : NULL_TXN);
     if (r != 0) {
         goto error_cleanup;
     }
@@ -562,7 +562,7 @@ toku_db_change_descriptor(DB *db, DB_TXN* txn, const DBT* descriptor, uint32_t f
     HANDLE_READ_ONLY_TXN(txn);
     HANDLE_DB_ILLEGAL_WORKING_PARENT_TXN(db, txn);
     int r = 0;
-    TOKUTXN ttxn = txn ? db_txn_struct_i(txn)->tokutxn : NULL;
+    TOKUTXN ttxn = txn ? &db_txn_struct_i(txn)->tokutxn : NULL;
     DBT old_descriptor;
     bool is_db_hot_index  = ((flags & DB_IS_HOT_INDEX) != 0);
     bool update_cmp_descriptor = ((flags & DB_UPDATE_CMP_DESCRIPTOR) != 0);
@@ -712,7 +712,7 @@ toku_db_stat64(DB * db, DB_TXN *txn, DB_BTREE_STAT64 *s) {
     struct ftstat64_s ftstat;
     TOKUTXN tokutxn = NULL;
     if (txn != NULL) {
-        tokutxn = db_txn_struct_i(txn)->tokutxn;
+        tokutxn = &db_txn_struct_i(txn)->tokutxn;
     }
     toku_ft_handle_stat64(db->i->ft_handle, tokutxn, &ftstat);
     s->bt_nkeys = ftstat.nkeys;
@@ -1097,7 +1097,7 @@ load_inames(DB_ENV * env, DB_TXN * txn, int N, DB * dbs[/*N*/], const char * new
     }
 
     if (txn) {
-        xid = toku_txn_get_txnid(db_txn_struct_i(txn)->tokutxn);
+        xid = toku_txn_get_txnid(&db_txn_struct_i(txn)->tokutxn);
     }
     for (i = 0; i < N; i++) {
         char * dname = dbs[i]->i->dname;
@@ -1114,7 +1114,7 @@ load_inames(DB_ENV * env, DB_TXN * txn, int N, DB * dbs[/*N*/], const char * new
 
     // Generate load log entries.
     if (!rval && txn) {
-        TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
+        TOKUTXN ttxn = &db_txn_struct_i(txn)->tokutxn;
         int do_fsync = 0;
         LSN *get_lsn = NULL;
         for (i = 0; i < N; i++) {

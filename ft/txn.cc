@@ -159,11 +159,6 @@ bool txn_declared_read_only(TOKUTXN txn) {
     return txn->declared_read_only;
 }
 
-static void invalidate_xa_xid (TOKU_XA_XID *xid) {
-    TOKU_ANNOTATE_NEW_MEMORY(xid, sizeof(*xid)); // consider it to be all invalid for valgrind
-    xid->formatID = -1; // According to the XA spec, -1 means "invalid data"
-}
-
 int 
 toku_txn_begin_txn (
     DB_TXN  *container_db_txn,
@@ -276,13 +271,19 @@ exit:
     return r;
 }
 
-DB_TXN *toku_txn_get_container_db_txn (TOKUTXN tokutxn) {
+DB_TXN *
+toku_txn_get_container_db_txn (TOKUTXN tokutxn) {
     DB_TXN * container = tokutxn->container_db_txn;
     return container;
 }
 
 void toku_txn_set_container_db_txn (TOKUTXN tokutxn, DB_TXN*container) {
     tokutxn->container_db_txn = container;
+}
+
+static void invalidate_xa_xid (TOKU_XA_XID *xid) {
+    TOKU_ANNOTATE_NEW_MEMORY(xid, sizeof(*xid)); // consider it to be all invalid for valgrind
+    xid->formatID = -1; // According to the XA spec, -1 means "invalid data"
 }
 
 static void toku_txn_create_txn (
@@ -313,7 +314,8 @@ static void toku_txn_create_txn (
         .current_rollback_hash = 0,
     };
 
-    static txn_child_manager tcm;
+static txn_child_manager tcm;
+
     struct tokutxn new_txn = {
         .txnid = {.parent_id64 = TXNID_NONE, .child_id64 = TXNID_NONE },
         .snapshot_txnid64 = TXNID_NONE,

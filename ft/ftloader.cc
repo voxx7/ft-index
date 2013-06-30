@@ -1245,6 +1245,52 @@ size_t ft_loader_leafentry_size(size_t key_size, size_t val_size, TXNID xid) {
     return s;
 }
 
+struct ft_loader_row_processor {
+    FTLOADER m_bl;
+    int m_i;
+    ft_loader_row_processor(FTLOADER bl, int i)
+        : m_bl(bl), m_i(i) {}
+
+    int process(DBT *dest_key, DBT *dest_val) const {
+        unsigned int klimit,vlimit; // maximum row sizes.
+        toku_ft_get_maximum_advised_key_value_lengths(&klimit, &vlimit);
+
+        if (dest_key->size > klimit) {
+            fprintf(stderr, "Key too big (keysize=%d bytes, limit=%d bytes)\n", dest_key->size, klimit);
+            return EINVAL;
+        }
+        if (dest_val->size > vlimit) {
+            fprintf(stderr, "Row too big (rowsize=%d bytes, limit=%d bytes)\n", dest_val->size, vlimit);
+            return EINVAL;
+        }
+
+        m_bl->extracted_datasizes[m_i] += ft_loader_leafentry_size(dest_key->size, dest_val->size, leafentry_xid(m_bl, m_i));
+
+        struct rowset *rows = &(m_bl->rows[m_i]);
+        struct merge_fileset *fs = &(m_bl->fs[m_i]);
+        ft_compare_func compare = m_bl->bt_compare_funs[m_i];
+
+        if (row_wont_fit(rows, dest_key->size + dest_val->size)) {
+            //printf("%s:%d rows.n_rows=%ld rows.n_bytes=%ld\n", __FILE__, __LINE__, rows->n_rows, rows->n_bytes);
+            int r = sort_and_write_rows(*rows, fs, m_bl, m_i, m_bl->dbs[m_i], compare); // cannot spawn this because of the race on rows.  If we were to create a new rows, and if sort_and_write_rows were to destroy the rows it is passed, we could spawn it, however.
+            // If we do spawn this, then we must account for the additional storage in the memory_per_rowset() function.
+            init_rowset(rows, memory_per_rowset_during_extract(m_bl)); // we passed the contents of rows to sort_and_write_rows.
+            if (r != 0) {
+                return r;
+            }
+        }
+        int r = add_row(rows, dest_key, dest_val);
+        if (r != 0) {
+            return r;
+        }
+        return 0;
+    }
+    static int call_process(void *extra, DBT *dest_key, DBT *dest_val) {
+        ft_loader_row_processor *e = static_cast<ft_loader_row_processor *>(extra);
+        return e->process(dest_key, dest_val);
+    }
+};
+
 static int process_primary_rows_internal (FTLOADER bl, struct rowset *primary_rowset)
 // process the rows in primary_rowset, and then destroy the rowset.
 // if FLUSH is true then write all the buffered rows out.
@@ -1254,13 +1300,7 @@ static int process_primary_rows_internal (FTLOADER bl, struct rowset *primary_ro
     int *XMALLOC_N(bl->N, error_codes);
 
     for (int i = 0; i < bl->N; i++) {
-        unsigned int klimit,vlimit; // maximum row sizes.
-        toku_ft_get_maximum_advised_key_value_lengths(&klimit, &vlimit);
-
         error_codes[i] = 0;
-        struct rowset *rows = &(bl->rows[i]);
-        struct merge_fileset *fs = &(bl->fs[i]);
-        ft_compare_func compare = bl->bt_compare_funs[i];
 
         DBT skey = zero_dbt;
         skey.flags = DB_DBT_REALLOC;
@@ -1282,53 +1322,35 @@ static int process_primary_rows_internal (FTLOADER bl, struct rowset *primary_ro
             DBT *dest_key = &skey;
             DBT *dest_val = &sval;
 
+            ft_loader_row_processor processor(bl, i);
             {
                 int r;
 
-                if (bl->dbs[i] != bl->src_db) {
+                if (bl->dbs[i] == bl->src_db) {
+                    dest_key = &pkey;
+                    dest_val = &pval;
+                } else if (bl->generate_row_for_put != NULL) {
                     r = bl->generate_row_for_put(bl->dbs[i], bl->src_db, dest_key, dest_val, &pkey, &pval);
-                    ...;
+                    if (r != 0) {
+                        error_codes[i] = r;
+                        inc_error_count();
+                        break;
+                    }
+                    r = processor.process(dest_key, dest_val);
                     if (r != 0) {
                         error_codes[i] = r;
                         inc_error_count();
                         break;
                     }
                 } else {
-                    dest_key = &pkey;
-                    dest_val = &pval;
+                    paranoid_invariant(bl->generate_rows_for_put != NULL);
+                    r = bl->generate_rows_for_put(bl->dbs[i], bl->src_db, &pkey, &pval, &processor, &processor.call_process);
+                    if (r != 0) {
+                        error_codes[i] = r;
+                        inc_error_count();
+                        break;
+                    }
                 }
-                if (dest_key->size > klimit) {
-                    error_codes[i] = EINVAL;
-                    fprintf(stderr, "Key too big (keysize=%d bytes, limit=%d bytes)\n", dest_key->size, klimit);
-                    inc_error_count();
-                    break;
-                }
-                if (dest_val->size > vlimit) {
-                    error_codes[i] = EINVAL;
-                    fprintf(stderr, "Row too big (rowsize=%d bytes, limit=%d bytes)\n", dest_val->size, vlimit);
-                    inc_error_count();
-                    break;
-                }
-            }
-
-            bl->extracted_datasizes[i] += ft_loader_leafentry_size(dest_key->size, dest_val->size, leafentry_xid(bl, i));
-
-            if (row_wont_fit(rows, dest_key->size + dest_val->size)) {
-                //printf("%s:%d rows.n_rows=%ld rows.n_bytes=%ld\n", __FILE__, __LINE__, rows->n_rows, rows->n_bytes);
-                int r = sort_and_write_rows(*rows, fs, bl, i, bl->dbs[i], compare); // cannot spawn this because of the race on rows.  If we were to create a new rows, and if sort_and_write_rows were to destroy the rows it is passed, we could spawn it, however.
-                // If we do spawn this, then we must account for the additional storage in the memory_per_rowset() function.
-                init_rowset(rows, memory_per_rowset_during_extract(bl)); // we passed the contents of rows to sort_and_write_rows.
-                if (r != 0) {
-                    error_codes[i] = r;
-                    inc_error_count();
-                    break;
-                }
-            }
-            int r = add_row(rows, dest_key, dest_val);
-            if (r != 0) {
-                error_codes[i] = r;
-                inc_error_count();
-                break;
             }
 
             //flags==0 means generate_row_for_put callback changed it

@@ -305,8 +305,10 @@ static int recover_env_init (RECOVER_ENV renv,
     renv->keep_cachetable_callback = keep_cachetable_callback;
     renv->bt_compare               = bt_compare;
     renv->update_function          = update_function;
-    renv->generate_rows_for_put     = generate_rows_for_put;
-    renv->generate_rows_for_del     = generate_rows_for_del;
+    renv->generate_row_for_put     = generate_row_for_put;
+    renv->generate_row_for_del     = generate_row_for_del;
+    renv->generate_rows_for_put    = generate_rows_for_put;
+    renv->generate_rows_for_del    = generate_rows_for_del;
     file_map_init(&renv->fmap);
     renv->goforward = false;
     renv->cp = toku_cachetable_get_checkpointer(renv->ct);
@@ -1016,6 +1018,23 @@ static int toku_recover_backward_enq_delete_any (struct logtype_enq_delete_any *
     return 0;
 }
 
+struct recover_enq_insert_multiple_row_processor {
+    struct file_map_tuple *m_tuple;
+    TOKUTXN m_txn;
+    struct logtype_enq_insert_multiple *m_l;
+    recover_enq_insert_multiple_row_processor(struct file_map_tuple *tuple, TOKUTXN txn, struct logtype_enq_insert_multiple *l)
+        : m_tuple(tuple), m_txn(txn), m_l(l) {}
+
+    int process(DBT *dest_key, DBT *dest_val) {
+        toku_ft_maybe_insert(m_tuple->ft_handle, dest_key, dest_val, m_txn, true, m_l->lsn, false, FT_INSERT);
+        return 0;
+    }
+    static int call_process(void *extra, DBT *dest_key, DBT *dest_val) {
+        recover_enq_insert_multiple_row_processor *e = static_cast<recover_enq_insert_multiple_row_processor *>(extra);
+        return e->process(dest_key, dest_val);
+    }
+};
+
 static int toku_recover_enq_insert_multiple (struct logtype_enq_insert_multiple *l, RECOVER_ENV renv) {
     int r;
     TOKUTXN txn = NULL;
@@ -1049,10 +1068,16 @@ static int toku_recover_enq_insert_multiple (struct logtype_enq_insert_multiple 
             if (r==0) {
                 // We found the cachefile.  (maybe) Do the insert.
                 DB *db = &tuple->fake_db;
-                r = renv->generate_row_for_put(db, src_db, &dest_key, &dest_val, &src_key, &src_val);
-                ...;
-                assert(r==0);
-                toku_ft_maybe_insert(tuple->ft_handle, &dest_key, &dest_val, txn, true, l->lsn, false, FT_INSERT);
+                recover_enq_insert_multiple_row_processor processor(tuple, txn, l);
+                if (renv->generate_row_for_put != NULL) {
+                    r = renv->generate_row_for_put(db, src_db, &dest_key, &dest_val, &src_key, &src_val);
+                    assert(r==0);
+                    processor.process(&dest_key, &dest_val);
+                } else {
+                    paranoid_invariant(renv->generate_rows_for_put != NULL);
+                    r = renv->generate_rows_for_put(db, src_db, &src_key, &src_val, &processor, &processor.call_process);
+                    assert(r == 0);
+                }
 
                 //flags==0 means generate_row_for_put callback changed it
                 //(and freed any memory necessary to do so) so that values are now stored
@@ -1076,6 +1101,23 @@ static int toku_recover_backward_enq_insert_multiple (struct logtype_enq_insert_
     // nothing
     return 0;
 }
+
+struct recover_enq_delete_multiple_row_processor {
+    struct file_map_tuple *m_tuple;
+    TOKUTXN m_txn;
+    struct logtype_enq_delete_multiple *m_l;
+    recover_enq_delete_multiple_row_processor(struct file_map_tuple *tuple, TOKUTXN txn, struct logtype_enq_delete_multiple *l)
+        : m_tuple(tuple), m_txn(txn), m_l(l) {}
+
+    int process(DBT *dest_key) {
+        toku_ft_maybe_delete(m_tuple->ft_handle, dest_key, m_txn, true, m_l->lsn, false);
+        return 0;
+    }
+    static int call_process(void *extra, DBT *dest_key) {
+        recover_enq_delete_multiple_row_processor *e = static_cast<recover_enq_delete_multiple_row_processor *>(extra);
+        return e->process(dest_key);
+    }
+};
 
 static int toku_recover_enq_delete_multiple (struct logtype_enq_delete_multiple *l, RECOVER_ENV renv) {
     int r;
@@ -1109,10 +1151,16 @@ static int toku_recover_enq_delete_multiple (struct logtype_enq_delete_multiple 
             if (r==0) {
                 // We found the cachefile.  (maybe) Do the delete.
                 DB *db = &tuple->fake_db;
-                r = renv->generate_row_for_del(db, src_db, &dest_key, &src_key, &src_val);
-                ...;
-                assert(r==0);
-                toku_ft_maybe_delete(tuple->ft_handle, &dest_key, txn, true, l->lsn, false);
+                recover_enq_delete_multiple_row_processor processor(tuple, txn, l);
+                if (renv->generate_row_for_del != NULL) {
+                    r = renv->generate_row_for_del(db, src_db, &dest_key, &src_key, &src_val);
+                    assert(r==0);
+                    processor.process(&dest_key);
+                } else {
+                    paranoid_invariant(renv->generate_rows_for_del != NULL);
+                    r = renv->generate_rows_for_del(db, src_db, &src_key, &src_val, &processor, &processor.call_process);
+                    assert(r == 0);
+                }
 
                 //flags==0 indicates the return values are stored in temporary memory that does
                 //not need to be freed.  We need to continue using DB_DBT_REALLOC however.

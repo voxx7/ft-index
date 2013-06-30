@@ -215,6 +215,7 @@ struct ft_loader_s {
     struct poll_callback_s poll_callback;
 
     generate_row_for_put_func generate_row_for_put;
+    generate_rows_for_put_func generate_rows_for_put;
     ft_compare_func *bt_compare_funs;
 
     DB *src_db;
@@ -334,6 +335,7 @@ int ft_loader_fi_unlink (struct file_infos *fi, FIDX idx);
 int toku_ft_loader_internal_init (/* out */ FTLOADER *blp,
 				   CACHETABLE cachetable,
 				   generate_row_for_put_func g,
+				   generate_rows_for_put_func gs,
 				   DB *src_db,
 				   int N, FT_HANDLE brts[/*N*/], DB* dbs[/*N*/],
 				   const char *new_fnames_in_env[/*N*/],

@@ -522,7 +522,7 @@ env_del_multiple(
         r = EINVAL;
         goto cleanup;
     }
-    if (!env->i->generate_row_for_del) {
+    if (!env->i->generate_row_for_del && !env->i->generate_rows_for_del) {
         r = EINVAL;
         goto cleanup;
     }
@@ -545,6 +545,7 @@ env_del_multiple(
         else {
             //Generate the key
             r = env->i->generate_row_for_del(db, src_db, &keys[which_db], src_key, src_val);
+            ...;
             if (r != 0) goto cleanup;
             del_keys[which_db] = keys[which_db];
         }
@@ -670,7 +671,7 @@ env_put_multiple_internal(
         r = EINVAL;
         goto cleanup;
     }
-    if (!env->i->generate_row_for_put) {
+    if (!env->i->generate_row_for_put && !env->i->generate_rows_for_put) {
         r = EINVAL;
         goto cleanup;
     }
@@ -694,6 +695,7 @@ env_put_multiple_internal(
         }
         else {
             r = env->i->generate_row_for_put(db, src_db, &keys[which_db], &vals[which_db], src_key, src_val);
+            ...;
             if (r != 0) goto cleanup;
             put_keys[which_db] = keys[which_db];
             put_vals[which_db] = vals[which_db];            
@@ -767,7 +769,7 @@ env_update_multiple(DB_ENV *env, DB *src_db, DB_TXN *txn,
         r = EINVAL;
         goto cleanup;
     }
-    if (!env->i->generate_row_for_put) {
+    if (!env->i->generate_row_for_put && !env->i->generate_rows_for_put) {
         r = EINVAL;
         goto cleanup;
     }
@@ -813,6 +815,7 @@ env_update_multiple(DB_ENV *env, DB *src_db, DB_TXN *txn,
             }
             else {
                 r = env->i->generate_row_for_put(db, src_db, &keys[which_db + num_dbs], NULL, old_src_key, old_src_data);
+                ...;
                 if (r != 0) goto cleanup;
                 curr_old_key = keys[which_db + num_dbs];
             }
@@ -826,6 +829,7 @@ env_update_multiple(DB_ENV *env, DB *src_db, DB_TXN *txn,
             }
             else {
                 r = env->i->generate_row_for_put(db, src_db, &keys[which_db], &vals[which_db], new_src_key, new_src_data);
+                ...;
                 if (r != 0) goto cleanup;
                 curr_new_key = keys[which_db];
                 curr_new_val = vals[which_db];

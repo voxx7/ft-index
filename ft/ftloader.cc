@@ -533,6 +533,7 @@ static uint64_t memory_per_rowset_during_merge (FTLOADER bl, int merge_factor, b
 int toku_ft_loader_internal_init (/* out */ FTLOADER *blp,
                                    CACHETABLE cachetable,
                                    generate_row_for_put_func g,
+                                   generate_rows_for_put_func gs,
                                    DB *src_db,
                                    int N, FT_HANDLE brts[/*N*/], DB* dbs[/*N*/],
                                    const char *new_fnames_in_env[/*N*/],
@@ -548,6 +549,7 @@ int toku_ft_loader_internal_init (/* out */ FTLOADER *blp,
     if (!bl) return get_error_errno();
 
     bl->generate_row_for_put = g;
+    bl->generate_rows_for_put = gs;
     bl->cachetable = cachetable;
     if (reserve_memory && bl->cachetable) {
         bl->did_reserve_memory = true;
@@ -637,6 +639,7 @@ int toku_ft_loader_internal_init (/* out */ FTLOADER *blp,
 int toku_ft_loader_open (/* out */ FTLOADER *blp,
                           CACHETABLE cachetable,
                           generate_row_for_put_func g,
+                          generate_rows_for_put_func gs,
                           DB *src_db,
                           int N, FT_HANDLE brts[/*N*/], DB* dbs[/*N*/],
                           const char *new_fnames_in_env[/*N*/],
@@ -660,7 +663,7 @@ int toku_ft_loader_open (/* out */ FTLOADER *blp,
 {
     int result = 0;
     {
-        int r = toku_ft_loader_internal_init(blp, cachetable, g, src_db,
+        int r = toku_ft_loader_internal_init(blp, cachetable, g, gs, src_db,
                                               N, brts, dbs,
                                               new_fnames_in_env,
                                               bt_compare_functions,
@@ -1284,6 +1287,7 @@ static int process_primary_rows_internal (FTLOADER bl, struct rowset *primary_ro
 
                 if (bl->dbs[i] != bl->src_db) {
                     r = bl->generate_row_for_put(bl->dbs[i], bl->src_db, dest_key, dest_val, &pkey, &pval);
+                    ...;
                     if (r != 0) {
                         error_codes[i] = r;
                         inc_error_count();

@@ -459,6 +459,7 @@ ydb_do_recovery (DB_ENV *env) {
                            env->i->dir, env->i->real_log_dir, env->i->bt_compare,
                            env->i->update_function,
                            env->i->generate_row_for_put, env->i->generate_row_for_del,
+                           env->i->generate_rows_for_put, env->i->generate_rows_for_del,
                            env->i->cachetable_size);
     return r;
 }
@@ -1692,6 +1693,28 @@ env_set_generate_row_callback_for_del(DB_ENV *env, generate_row_for_del_func gen
     }
     return r;
 }
+
+static int
+env_set_generate_rows_callback_for_put(DB_ENV *env, generate_rows_for_put_func generate_rows_for_put) {
+    HANDLE_PANICKED_ENV(env);
+    int r = 0;
+    if (env_opened(env)) r = EINVAL;
+    else {
+        env->i->generate_rows_for_put = generate_rows_for_put;
+    }
+    return r;
+}
+
+static int
+env_set_generate_rows_callback_for_del(DB_ENV *env, generate_rows_for_del_func generate_rows_for_del) {
+    HANDLE_PANICKED_ENV(env);
+    int r = 0;
+    if (env_opened(env)) r = EINVAL;
+    else {
+        env->i->generate_rows_for_del = generate_rows_for_del;
+    }
+    return r;
+}
 static int
 env_set_redzone(DB_ENV *env, int redzone) {
     HANDLE_PANICKED_ENV(env);
@@ -2267,6 +2290,8 @@ toku_env_create(DB_ENV ** envp, uint32_t flags) {
     USENV(set_update);
     USENV(set_generate_row_callback_for_put);
     USENV(set_generate_row_callback_for_del);
+    USENV(set_generate_rows_callback_for_put);
+    USENV(set_generate_rows_callback_for_del);
     USENV(set_lg_bsize);
     USENV(set_lg_dir);
     USENV(set_lg_max);

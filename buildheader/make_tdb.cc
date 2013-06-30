@@ -431,10 +431,12 @@ static void print_db_env_struct (void) {
                              "                                               const DBT *src_key, const DBT *src_val,\n"
                              "                                               uint32_t num_dbs, DB **db_array, DBT *keys, DBT *vals, uint32_t *flags_array) /* insert into multiple DBs */",
                              "int (*set_generate_row_callback_for_put)    (DB_ENV *env, generate_row_for_put_func generate_row_for_put)",
+                             "int (*set_generate_rows_callback_for_put)    (DB_ENV *env, generate_rows_for_put_func generate_rows_for_put)",
                              "int (*del_multiple)                         (DB_ENV *env, DB *src_db, DB_TXN *txn,\n"
                              "                                               const DBT *src_key, const DBT *src_val,\n"
                              "                                               uint32_t num_dbs, DB **db_array, DBT *keys, uint32_t *flags_array) /* delete from multiple DBs */",
                              "int (*set_generate_row_callback_for_del)    (DB_ENV *env, generate_row_for_del_func generate_row_for_del)",
+                             "int (*set_generate_rows_callback_for_del)    (DB_ENV *env, generate_rows_for_del_func generate_rows_for_del)",
                              "int (*update_multiple)                      (DB_ENV *env, DB *src_db, DB_TXN *txn,\n"
                              "                                               DBT *old_src_key, DBT *old_src_data,\n"
                              "                                               DBT *new_src_key, DBT *new_src_data,\n"
@@ -746,6 +748,8 @@ int main (int argc, char *const argv[] __attribute__((__unused__))) {
 
     printf("typedef int (*generate_row_for_put_func)(DB *dest_db, DB *src_db, DBT *dest_key, DBT *dest_val, const DBT *src_key, const DBT *src_val);\n");
     printf("typedef int (*generate_row_for_del_func)(DB *dest_db, DB *src_db, DBT *dest_key, const DBT *src_key, const DBT *src_val);\n");
+    printf("typedef int (*generate_rows_for_put_func)(DB *dest_db, DB *src_db, const DBT *src_key, const DBT *src_val, void *extra, int (*save_row_for_put)(void *extra, DBT *dest_key, DBT *dest_val));\n");
+    printf("typedef int (*generate_rows_for_del_func)(DB *dest_db, DB *src_db, const DBT *src_key, const DBT *src_val, void *extra, int (*save_row_for_del)(void *extra, DBT *dest_key));\n");
 
     print_db_env_struct();
     print_db_key_range_struct();

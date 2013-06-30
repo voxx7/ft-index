@@ -497,9 +497,11 @@ indexer_generate_hot_key_val(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, UXRH
     DB_ENV *env = indexer->i->env;
     if (hotval) {
         result = env->i->generate_row_for_put(hotdb, indexer->i->src_db, hotkey, hotval, &srckey, &srcval);
+        ...;
     }
     else {
         result = env->i->generate_row_for_del(hotdb, indexer->i->src_db, hotkey, &srckey, &srcval);
+        ...;
     }
     toku_destroy_dbt(&srckey);
     toku_destroy_dbt(&srcval);

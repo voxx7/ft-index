@@ -187,6 +187,8 @@ struct recover_env {
     ft_update_func update_function;
     generate_row_for_put_func generate_row_for_put;
     generate_row_for_del_func generate_row_for_del;
+    generate_rows_for_put_func generate_rows_for_put;
+    generate_rows_for_del_func generate_rows_for_del;
     struct scan_state ss;
     struct file_map fmap;
     bool goforward;
@@ -280,6 +282,8 @@ static int recover_env_init (RECOVER_ENV renv,
                              ft_update_func update_function,
                              generate_row_for_put_func generate_row_for_put,
                              generate_row_for_del_func generate_row_for_del,
+                             generate_rows_for_put_func generate_rows_for_put,
+                             generate_rows_for_del_func generate_rows_for_del,
                              size_t cachetable_size) {
     int r = 0;
 
@@ -301,8 +305,8 @@ static int recover_env_init (RECOVER_ENV renv,
     renv->keep_cachetable_callback = keep_cachetable_callback;
     renv->bt_compare               = bt_compare;
     renv->update_function          = update_function;
-    renv->generate_row_for_put     = generate_row_for_put;
-    renv->generate_row_for_del     = generate_row_for_del;
+    renv->generate_rows_for_put     = generate_rows_for_put;
+    renv->generate_rows_for_del     = generate_rows_for_del;
     file_map_init(&renv->fmap);
     renv->goforward = false;
     renv->cp = toku_cachetable_get_checkpointer(renv->ct);
@@ -1046,6 +1050,7 @@ static int toku_recover_enq_insert_multiple (struct logtype_enq_insert_multiple 
                 // We found the cachefile.  (maybe) Do the insert.
                 DB *db = &tuple->fake_db;
                 r = renv->generate_row_for_put(db, src_db, &dest_key, &dest_val, &src_key, &src_val);
+                ...;
                 assert(r==0);
                 toku_ft_maybe_insert(tuple->ft_handle, &dest_key, &dest_val, txn, true, l->lsn, false, FT_INSERT);
 
@@ -1105,6 +1110,7 @@ static int toku_recover_enq_delete_multiple (struct logtype_enq_delete_multiple 
                 // We found the cachefile.  (maybe) Do the delete.
                 DB *db = &tuple->fake_db;
                 r = renv->generate_row_for_del(db, src_db, &dest_key, &src_key, &src_val);
+                ...;
                 assert(r==0);
                 toku_ft_maybe_delete(tuple->ft_handle, &dest_key, txn, true, l->lsn, false);
 
@@ -1589,6 +1595,8 @@ int tokudb_recover(DB_ENV *env,
                    ft_update_func update_function,
                    generate_row_for_put_func generate_row_for_put,
                    generate_row_for_del_func generate_row_for_del,
+                   generate_rows_for_put_func generate_rows_for_put,
+                   generate_rows_for_del_func generate_rows_for_del,
                    size_t cachetable_size) {
     int r;
     int lockfd = -1;
@@ -1610,6 +1618,8 @@ int tokudb_recover(DB_ENV *env,
                              update_function,
                              generate_row_for_put,
                              generate_row_for_del,
+                             generate_rows_for_put,
+                             generate_rows_for_del,
                              cachetable_size);
         assert(r == 0);
 

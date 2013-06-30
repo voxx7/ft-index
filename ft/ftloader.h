@@ -102,6 +102,7 @@ typedef struct ft_loader_s *FTLOADER;
 int toku_ft_loader_open (FTLOADER *bl,
                           CACHETABLE cachetable,
 			  generate_row_for_put_func g,
+			  generate_rows_for_put_func gs,
 			  DB *src_db,
 			  int N,
 			  FT_HANDLE brts[/*N*/], DB* dbs[/*N*/],

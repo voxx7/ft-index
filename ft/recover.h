@@ -114,6 +114,8 @@ int tokudb_recover (DB_ENV *env,
                     ft_update_func update_function,
                     generate_row_for_put_func       generate_row_for_put,
                     generate_row_for_del_func       generate_row_for_del,
+                    generate_rows_for_put_func       generate_rows_for_put,
+                    generate_rows_for_del_func       generate_rows_for_del,
                     size_t cachetable_size);
 
 // Effect: Check the tokudb logs to determine whether or not we need to run recovery.

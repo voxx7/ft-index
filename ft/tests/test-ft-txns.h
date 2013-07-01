@@ -139,7 +139,7 @@ static inline void test_setup_and_recover(const char *envdir, TOKULOGGER *logger
                        NULL_prepared_txn_callback,
                        xid_lsn_keep_cachetable_callback,
                        logger,
-                       envdir, envdir, 0, 0, 0, NULL, 0);
+                       envdir, envdir, 0, 0, 0, NULL, NULL, NULL, 0);
     CKERR(r);
     if (!toku_logger_is_open(logger)) {
         //Did not need recovery.

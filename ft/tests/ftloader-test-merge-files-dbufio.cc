@@ -405,6 +405,7 @@ static void test (const char *directory, bool is_error) {
 	int r = toku_ft_loader_internal_init (&bl,
 					       ct,
 					       (generate_row_for_put_func)NULL,
+                                              (generate_rows_for_put_func)NULL,
 					       (DB*)NULL,
 					       N_DEST_DBS, brts, dbs,
 					       new_fnames_in_env,

@@ -156,7 +156,10 @@ static int indexer_append_xid(DB_INDEXER *indexer, TXNID xid, XIDS *xids_result)
 
 static bool indexer_find_prev_xr(DB_INDEXER *indexer, ULEHANDLE ule, uint64_t xrindex, uint64_t *prev_xrindex);
 
-static int indexer_generate_hot_key_val(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, UXRHANDLE uxr, DBT *hotkey, DBT *hotval);
+template<class row_processor>
+static int indexer_generate_hot_key_val_for_put(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, UXRHANDLE uxr, row_processor &processor);
+template<class row_processor>
+static int indexer_generate_hot_key_for_del(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, UXRHANDLE uxr, row_processor &processor);
 static int indexer_ft_delete_provisional(DB_INDEXER *indexer, DB *hotdb, DBT *hotkey, XIDS xids, TOKUTXN txn);
 static int indexer_ft_delete_committed(DB_INDEXER *indexer, DB *hotdb, DBT *hotkey, XIDS xids);
 static int indexer_ft_insert_provisional(DB_INDEXER *indexer, DB *hotdb, DBT *hotkey, DBT *hotval, XIDS xids, TOKUTXN txn);
@@ -188,6 +191,42 @@ indexer_undo_do_committed(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule) {
     // init the xids to the root xid
     XIDS xids = xids_get_root_xids();
 
+    struct indexer_delete_row_processor {
+        DB_INDEXER *m_indexer;
+        DB *m_hotdb;
+        XIDS &m_xids;
+        indexer_delete_row_processor(DB_INDEXER *indexer, DB *hotdb, XIDS &xids) : m_indexer(indexer), m_hotdb(hotdb), m_xids(xids) {}
+        int process(DBT *dest_key) const {
+            int result = indexer_ft_delete_committed(m_indexer, m_hotdb, dest_key, m_xids);
+            if (result == 0) {
+                indexer_commit_keys_add(&m_indexer->i->commit_keys, dest_key->size, dest_key->data);
+            }
+            return 0;
+        }
+        static int call_process(void *extra, DBT *dest_key) {
+            indexer_delete_row_processor *e = static_cast<indexer_delete_row_processor *>(extra);
+            return e->process(dest_key);
+        }
+    } delete_processor(indexer, hotdb, xids);
+
+    struct indexer_insert_row_processor {
+        DB_INDEXER *m_indexer;
+        DB *m_hotdb;
+        XIDS &m_xids;
+        indexer_insert_row_processor(DB_INDEXER *indexer, DB *hotdb, XIDS &xids) : m_indexer(indexer), m_hotdb(hotdb), m_xids(xids) {}
+        int process(DBT *dest_key, DBT *dest_val) const {
+            int result = indexer_ft_insert_committed(m_indexer, m_hotdb, dest_key, dest_val, m_xids);
+            if (result == 0) {
+                indexer_commit_keys_add(&m_indexer->i->commit_keys, dest_key->size, dest_key->data);
+            }
+            return 0;
+        }
+        static int call_process(void *extra, DBT *dest_key, DBT *dest_val) {
+            indexer_insert_row_processor *e = static_cast<indexer_insert_row_processor *>(extra);
+            return e->process(dest_key, dest_val);
+        }
+    } insert_processor(indexer, hotdb, xids);
+
     // scan the committed stack from bottom to top
     uint32_t num_committed = ule_get_num_committed(ule);
     for (uint64_t xrindex = 0; xrindex < num_committed; xrindex++) {
@@ -214,13 +253,7 @@ indexer_undo_do_committed(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule) {
                 ; // do nothing
             } else if (uxr_is_insert(prevuxr)) {
                 // generate the hot delete key
-                result = indexer_generate_hot_key_val(indexer, hotdb, ule, prevuxr, &indexer->i->hotkey, NULL);
-                if (result == 0) {
-                    // send the delete message
-                    result = indexer_ft_delete_committed(indexer, hotdb, &indexer->i->hotkey, xids);
-                    if (result == 0) 
-                        indexer_commit_keys_add(&indexer->i->commit_keys, indexer->i->hotkey.size, indexer->i->hotkey.data);
-                }
+                result = indexer_generate_hot_key_for_del(indexer, hotdb, ule, prevuxr, delete_processor);
             } else
                 assert(0);
         }
@@ -232,13 +265,7 @@ indexer_undo_do_committed(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule) {
             ; // do nothing
         } else if (uxr_is_insert(uxr)) {
             // generate the hot insert key and val
-            result = indexer_generate_hot_key_val(indexer, hotdb, ule, uxr, &indexer->i->hotkey, &indexer->i->hotval);
-            if (result == 0) {
-                // send the insert message
-                result = indexer_ft_insert_committed(indexer, hotdb, &indexer->i->hotkey, &indexer->i->hotval, xids);
-                if (result == 0)
-                    indexer_commit_keys_add(&indexer->i->commit_keys, indexer->i->hotkey.size, indexer->i->hotkey.data);
-            }
+            result = indexer_generate_hot_key_val_for_put(indexer, hotdb, ule, uxr, insert_processor);
         } else
             assert(0);
 
@@ -296,7 +323,7 @@ indexer_undo_do_provisional(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, struc
 
     TXNID outermost_xid_state;
     outermost_xid_state = prov_states[0];
-    
+
     // scan the provisional stack from the outermost to the innermost transaction record
     TOKUTXN curr_txn;
     curr_txn = NULL;
@@ -351,30 +378,47 @@ indexer_undo_do_provisional(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, struc
             if (uxr_is_delete(prevuxr)) {
                 ; // do nothing
             } else if (uxr_is_insert(prevuxr)) {
-                // generate the hot delete key
-                result = indexer_generate_hot_key_val(indexer, hotdb, ule, prevuxr, &indexer->i->hotkey, NULL);
-                if (result == 0) {
-                    // send the delete message
-                    switch (outermost_xid_state) {
-                    case TOKUTXN_LIVE:
-                    case TOKUTXN_PREPARING:
-                        invariant(this_xid_state != TOKUTXN_ABORTING);
-                        invariant(!curr_txn || toku_txn_get_state(curr_txn) == TOKUTXN_LIVE || toku_txn_get_state(curr_txn) == TOKUTXN_PREPARING);
-                        result = indexer_ft_delete_provisional(indexer, hotdb, &indexer->i->hotkey, xids, curr_txn);
-                        if (result == 0) {
-                            indexer_lock_key(indexer, hotdb, &indexer->i->hotkey, prov_ids[0], curr_txn);
+                struct indexer_delete_row_processor {
+                    DB_INDEXER *m_indexer;
+                    DB *m_hotdb;
+                    XIDS m_xids;
+                    TOKUTXN_STATE m_this_xid_state;
+                    TOKUTXN m_curr_txn;
+                    TXNID m_outermost_xid_state;
+                    TXNID m_prov_id;
+                    indexer_delete_row_processor(DB_INDEXER *indexer, DB *hotdb, XIDS xids, TOKUTXN_STATE this_xid_state, TOKUTXN curr_txn, TXNID outermost_xid_state, TXNID prov_id)
+                        : m_indexer(indexer), m_hotdb(hotdb), m_xids(xids), m_this_xid_state(this_xid_state), m_curr_txn(curr_txn), m_outermost_xid_state(outermost_xid_state), m_prov_id(prov_id) {}
+                    int process(DBT *dest_key) const {
+                        int result;
+                        switch (m_outermost_xid_state) {
+                        case TOKUTXN_LIVE:
+                        case TOKUTXN_PREPARING:
+                            invariant(m_this_xid_state != TOKUTXN_ABORTING);
+                            invariant(!m_curr_txn || toku_txn_get_state(m_curr_txn) == TOKUTXN_LIVE || toku_txn_get_state(m_curr_txn) == TOKUTXN_PREPARING);
+                            result = indexer_ft_delete_provisional(m_indexer, m_hotdb, dest_key, m_xids, m_curr_txn);
+                            if (result == 0) {
+                                indexer_lock_key(m_indexer, m_hotdb, dest_key, m_prov_id, m_curr_txn);
+                            }
+                            break;
+                        case TOKUTXN_COMMITTING:
+                        case TOKUTXN_RETIRED:
+                            result = indexer_ft_delete_committed(m_indexer, m_hotdb, dest_key, m_xids);
+                            if (result == 0)
+                                indexer_commit_keys_add(&m_indexer->i->commit_keys, dest_key->size, dest_key->data);
+                            break;
+                        case TOKUTXN_ABORTING: // can not happen since we stop processing the leaf entry if the outer most xr is aborting
+                            assert(0);
                         }
-                        break;
-                    case TOKUTXN_COMMITTING:
-                    case TOKUTXN_RETIRED:
-                        result = indexer_ft_delete_committed(indexer, hotdb, &indexer->i->hotkey, xids);
-                        if (result == 0)
-                            indexer_commit_keys_add(&indexer->i->commit_keys, indexer->i->hotkey.size, indexer->i->hotkey.data);
-                        break;
-                    case TOKUTXN_ABORTING: // can not happen since we stop processing the leaf entry if the outer most xr is aborting
-                        assert(0);
+                        return result;
                     }
-                }
+                    static int call_process(void *extra, DBT *dest_key) {
+                        indexer_delete_row_processor *e = static_cast<indexer_delete_row_processor *>(extra);
+                        return e->process(dest_key);
+                    }
+                } delete_processor(indexer, hotdb, xids, this_xid_state, curr_txn, outermost_xid_state, prov_ids[0]);
+
+                // generate the hot delete key
+                result = indexer_generate_hot_key_for_del(indexer, hotdb, ule, prevuxr, delete_processor);
             } else
                 assert(0);
         }
@@ -385,31 +429,48 @@ indexer_undo_do_provisional(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, struc
         if (uxr_is_delete(uxr)) {
             ; // do nothing
         } else if (uxr_is_insert(uxr)) {
-            // generate the hot insert key and val
-            result = indexer_generate_hot_key_val(indexer, hotdb, ule, uxr, &indexer->i->hotkey, &indexer->i->hotval);
-            if (result == 0) {
-                // send the insert message
-                switch (outermost_xid_state) {
-                case TOKUTXN_LIVE:
-                case TOKUTXN_PREPARING:
-                    assert(this_xid_state != TOKUTXN_ABORTING);
-                    invariant(!curr_txn || toku_txn_get_state(curr_txn) == TOKUTXN_LIVE || toku_txn_get_state(curr_txn) == TOKUTXN_PREPARING);
-                    result = indexer_ft_insert_provisional(indexer, hotdb, &indexer->i->hotkey, &indexer->i->hotval, xids, curr_txn);
-                    if (result == 0) {
-                        indexer_lock_key(indexer, hotdb, &indexer->i->hotkey, prov_ids[0], prov_txns[0]);
+            struct indexer_insert_row_processor {
+                DB_INDEXER *m_indexer;
+                DB *m_hotdb;
+                XIDS m_xids;
+                TOKUTXN_STATE m_this_xid_state;
+                TOKUTXN m_curr_txn;
+                TOKUTXN m_prov_txn;
+                TXNID m_outermost_xid_state;
+                TXNID m_prov_id;
+                indexer_insert_row_processor(DB_INDEXER *indexer, DB *hotdb, XIDS xids, TOKUTXN_STATE this_xid_state, TOKUTXN curr_txn, TOKUTXN prov_txn, TXNID outermost_xid_state, TXNID prov_id)
+                    : m_indexer(indexer), m_hotdb(hotdb), m_xids(xids), m_this_xid_state(this_xid_state), m_curr_txn(curr_txn), m_prov_txn(prov_txn), m_outermost_xid_state(outermost_xid_state), m_prov_id(prov_id) {}
+                int process(DBT *dest_key, DBT *dest_val) const {
+                    int result;
+                    switch (m_outermost_xid_state) {
+                    case TOKUTXN_LIVE:
+                    case TOKUTXN_PREPARING:
+                        invariant(m_this_xid_state != TOKUTXN_ABORTING);
+                        invariant(!m_curr_txn || toku_txn_get_state(m_curr_txn) == TOKUTXN_LIVE || toku_txn_get_state(m_curr_txn) == TOKUTXN_PREPARING);
+                        result = indexer_ft_insert_provisional(m_indexer, m_hotdb, dest_key, dest_val, m_xids, m_curr_txn);
+                        if (result == 0) {
+                            indexer_lock_key(m_indexer, m_hotdb, dest_key, m_prov_id, m_prov_txn);
+                        }
+                        break;
+                    case TOKUTXN_COMMITTING:
+                    case TOKUTXN_RETIRED:
+                        result = indexer_ft_insert_committed(m_indexer, m_hotdb, dest_key, dest_val, m_xids);
+                        if (result == 0)
+                            indexer_commit_keys_add(&m_indexer->i->commit_keys, dest_key->size, dest_key->data);
+                        break;
+                    case TOKUTXN_ABORTING: // can not happen since we stop processing the leaf entry if the outer most xr is aborting
+                        assert(0);
                     }
-                    break;
-                case TOKUTXN_COMMITTING:
-                case TOKUTXN_RETIRED:
-                    result = indexer_ft_insert_committed(indexer, hotdb, &indexer->i->hotkey, &indexer->i->hotval, xids);
-                    // no need to do this because we do implicit commits on inserts
-                    if (0 && result == 0)
-                        indexer_commit_keys_add(&indexer->i->commit_keys, indexer->i->hotkey.size, indexer->i->hotkey.data);
-                    break;
-                case TOKUTXN_ABORTING: // can not happen since we stop processing the leaf entry if the outer most xr is aborting
-                    assert(0);
+                    return result;
                 }
-            }
+                static int call_process(void *extra, DBT *dest_key, DBT *dest_val) {
+                    indexer_insert_row_processor *e = static_cast<indexer_insert_row_processor *>(extra);
+                    return e->process(dest_key, dest_val);
+                }
+            } insert_processor(indexer, hotdb, xids, this_xid_state, curr_txn, prov_txns[0], outermost_xid_state, prov_ids[0]);
+
+            // generate the hot insert key and val
+            result = indexer_generate_hot_key_val_for_put(indexer, hotdb, ule, uxr, insert_processor);
         } else
             assert(0);
 
@@ -481,8 +542,9 @@ indexer_append_xid(DB_INDEXER *UU(indexer), TXNID xid, XIDS *xids_result) {
     return result;
 }
 
+template<class row_processor>
 static int
-indexer_generate_hot_key_val(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, UXRHANDLE uxr, DBT *hotkey, DBT *hotval) {
+indexer_generate_hot_key_val_for_put(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, UXRHANDLE uxr, row_processor &processor) {
     int result = 0;
 
     // setup the source key
@@ -495,13 +557,44 @@ indexer_generate_hot_key_val(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, UXRH
 
     // generate the secondary row
     DB_ENV *env = indexer->i->env;
-    if (hotval) {
-        result = env->i->generate_row_for_put(hotdb, indexer->i->src_db, hotkey, hotval, &srckey, &srcval);
-        ...;
+    if (env->i->generate_row_for_put != NULL) {
+        result = env->i->generate_row_for_put(hotdb, indexer->i->src_db, &indexer->i->hotkey, &indexer->i->hotval, &srckey, &srcval);
+        if (result == 0) {
+            result = processor.process(&indexer->i->hotkey, &indexer->i->hotval);
+        }
+    } else {
+        paranoid_invariant(env->i->generate_rows_for_put != NULL);
+        result = env->i->generate_rows_for_put(hotdb, indexer->i->src_db, &srckey, &srcval, &processor, &processor.call_process);
     }
-    else {
-        result = env->i->generate_row_for_del(hotdb, indexer->i->src_db, hotkey, &srckey, &srcval);
-        ...;
+    toku_destroy_dbt(&srckey);
+    toku_destroy_dbt(&srcval);
+
+    return result;
+}
+
+template<class row_processor>
+static int
+indexer_generate_hot_key_for_del(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, UXRHANDLE uxr, row_processor &processor) {
+    int result = 0;
+
+    // setup the source key
+    DBT srckey;
+    toku_fill_dbt(&srckey, ule_get_key(ule), ule_get_keylen(ule));
+
+    // setup the source val
+    DBT srcval;
+    toku_fill_dbt(&srcval, uxr_get_val(uxr), uxr_get_vallen(uxr));
+
+    // generate the secondary row
+    DB_ENV *env = indexer->i->env;
+    if (env->i->generate_row_for_del != NULL) {
+        result = env->i->generate_row_for_del(hotdb, indexer->i->src_db, &indexer->i->hotkey, &srckey, &srcval);
+        if (result == 0) {
+            result = processor.process(&indexer->i->hotkey);
+        }
+    } else {
+        paranoid_invariant(env->i->generate_rows_for_del != NULL);
+        result = env->i->generate_rows_for_del(hotdb, indexer->i->src_db, &srckey, &srcval, &processor, &processor.call_process);
     }
     toku_destroy_dbt(&srckey);
     toku_destroy_dbt(&srcval);

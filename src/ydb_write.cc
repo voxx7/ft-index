@@ -88,6 +88,10 @@ PATENT RIGHTS GRANT:
 #ident "The technology is licensed by the Massachusetts Institute of Technology, Rutgers State University of New Jersey, and the Research Foundation of State University of New York at Stony Brook under United States of America Serial No. 11/760379 and to the patents and/or patent applications resulting from it."
 #ident "$Id$"
 
+#include <memory>
+#include <vector>
+#include <utility>
+
 #include <db.h>
 #include "ydb-internal.h"
 #include "indexer.h"
@@ -435,7 +439,7 @@ lookup_src_db(uint32_t num_dbs, DB *db_array[], DB *src_db) {
 }
 
 static int
-do_del_multiple(DB_TXN *txn, uint32_t num_dbs, DB *db_array[], DBT keys[], DB *src_db, const DBT *src_key) {
+do_del_multiple(DB_TXN *txn, uint32_t num_dbs, DB *db_array[], DBT keys[], std::unique_ptr<std::vector<DBT>[]> &key_vecs, DB *src_db, const DBT *src_key) {
     int r = 0;
     TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
     for (uint32_t which_db = 0; r == 0 && which_db < num_dbs; which_db++) {
@@ -459,7 +463,14 @@ do_del_multiple(DB_TXN *txn, uint32_t num_dbs, DB *db_array[], DBT keys[], DB *s
             do_delete = !toku_indexer_is_key_right_of_le_cursor(indexer, indexer_src_key);
         }
         if (r == 0 && do_delete) {
-            toku_ft_maybe_delete(db->i->ft_handle, &keys[which_db], ttxn, false, ZERO_LSN, false);
+            if (key_vecs) {
+                std::vector<DBT> &key_vec = key_vecs[which_db];
+                for (std::vector<DBT>::iterator it = key_vec.begin(); it != key_vec.end(); ++it) {
+                    toku_ft_maybe_delete(db->i->ft_handle, &(*it), ttxn, false, ZERO_LSN, false);
+                }
+            } else {
+                toku_ft_maybe_delete(db->i->ft_handle, &keys[which_db], ttxn, false, ZERO_LSN, false);
+            }
         }
     }
     return r;
@@ -510,12 +521,14 @@ env_del_multiple(
 {
     int r;
     DB_INDEXER* indexer = NULL;
+    DBT del_keys[num_dbs];
+    std::unique_ptr<std::vector<DBT>[]> del_key_vecs(env->i->generate_rows_for_del == NULL
+                                                     ? NULL
+                                                     : new std::vector<DBT>[num_dbs]);
 
     HANDLE_PANICKED_ENV(env);
     HANDLE_READ_ONLY_TXN(txn);
 
-    uint32_t lock_flags[num_dbs];
-    uint32_t remaining_flags[num_dbs];
     FT_HANDLE brts[num_dbs];
     if (!txn) {
         r = EINVAL;
@@ -532,134 +545,108 @@ env_del_multiple(
         goto cleanup;
     }
 
-    if (env->i->generate_row_for_del != NULL) {
-        DBT del_keys[num_dbs];
-        for (uint32_t which_db = 0; which_db < num_dbs; which_db++) {
-            DB *db = db_array[which_db];
-            lock_flags[which_db] = get_prelocked_flags(flags_array[which_db]);
-            remaining_flags[which_db] = flags_array[which_db] & ~lock_flags[which_db];
+    for (uint32_t which_db = 0; which_db < num_dbs; which_db++) {
+        DB *db = db_array[which_db];
+        uint32_t lock_flags = get_prelocked_flags(flags_array[which_db]);
+        uint32_t remaining_flags = flags_array[which_db] & ~lock_flags;
 
+        std::vector<DBT> *del_key_vec = del_key_vecs ? &del_key_vecs[which_db] : NULL;
+        struct del_multiple_row_processor {
+            DB *m_db;
+            DB_TXN *m_txn;
+            uint32_t m_remaining_flags;
+            uint32_t m_lock_flags;
+            std::vector<DBT> *m_del_key_vec;
+            del_multiple_row_processor(DB *db, DB_TXN *txn, uint32_t remaining_flags, uint32_t lock_flags, std::vector<DBT> *del_key_vec)
+                : m_db(db), m_txn(txn), m_remaining_flags(remaining_flags), m_lock_flags(lock_flags), m_del_key_vec(del_key_vec) {}
+            int check_key(DBT *dest_key) const {
+                if (m_remaining_flags & ~DB_DELETE_ANY) {
+                    return EINVAL;
+                }
+                int r;
+                bool error_if_missing = (bool)(!(m_remaining_flags&DB_DELETE_ANY));
+                if (error_if_missing) {
+                    //Check if the key exists in the db.
+                    r = db_getf_set(m_db, m_txn, m_lock_flags|DB_SERIALIZABLE|DB_RMW, dest_key, ydb_getf_do_nothing, NULL);
+                    if (r != 0) return r;
+                }
+
+                //Do locking if necessary.
+                if (m_db->i->lt && !(m_lock_flags & DB_PRELOCKED_WRITE)) {
+                    //Needs locking
+                    r = toku_db_get_point_write_lock(m_db, m_txn, dest_key);
+                    if (r != 0) return r;
+                }
+                return 0;
+            }
+            int process(DBT *dest_key) const {
+                int r = check_key(dest_key);
+                if (r != 0) {
+                    return r;
+                }
+                paranoid_invariant(m_del_key_vec != NULL);
+                m_del_key_vec->push_back(*dest_key);
+                return 0;
+            }
+            static int call_process(void *extra, DBT *dest_key) {
+                del_multiple_row_processor *e = static_cast<del_multiple_row_processor *>(extra);
+                return e->process(dest_key);
+            }
+        } processor(db, txn, remaining_flags, lock_flags, del_key_vec);
+
+        if (env->i->generate_row_for_del != NULL) {
             if (db == src_db) {
                 del_keys[which_db] = *src_key;
+                r = processor.check_key(&del_keys[which_db]);
+                if (r != 0) {
+                    goto cleanup;
+                }
             } else {
                 //Generate the key
                 r = env->i->generate_row_for_del(db, src_db, &keys[which_db], src_key, src_val);
                 if (r != 0) goto cleanup;
                 del_keys[which_db] = keys[which_db];
-            }
-
-            if (remaining_flags[which_db] & ~DB_DELETE_ANY) {
-                r = EINVAL;
-                goto cleanup;
-            }
-            bool error_if_missing = (bool)(!(remaining_flags[which_db]&DB_DELETE_ANY));
-            if (error_if_missing) {
-                //Check if the key exists in the db.
-                r = db_getf_set(db, txn, lock_flags[which_db]|DB_SERIALIZABLE|DB_RMW, &del_keys[which_db], ydb_getf_do_nothing, NULL);
-                if (r != 0) goto cleanup;
-            }
-
-            //Do locking if necessary.
-            if (db->i->lt && !(lock_flags[which_db] & DB_PRELOCKED_WRITE)) {
-                //Needs locking
-                r = toku_db_get_point_write_lock(db, txn, &del_keys[which_db]);
-                if (r != 0) goto cleanup;
-            }
-            brts[which_db] = db->i->ft_handle;
-        }
-
-        if (indexer) {
-            toku_indexer_lock(indexer);
-        }
-        toku_multi_operation_client_lock();
-        if (num_dbs == 1) {
-            log_del_single(txn, brts[0], &del_keys[0]);
-        }
-        else {
-            log_del_multiple(txn, src_db, src_key, src_val, num_dbs, brts, del_keys);
-        }
-        if (r == 0) {
-            r = do_del_multiple(txn, num_dbs, db_array, del_keys, src_db, src_key);
-        }
-        toku_multi_operation_client_unlock();
-        if (indexer) {
-            toku_indexer_unlock(indexer);
-        }
-    } else {
-        paranoid_invariant(env->i->generate_rows_for_del != NULL);
-        std::vector<DBT> del_key_vecs[num_dbs];
-        for (uint32_t which_db = 0; which_db < num_dbs; which_db++) {
-            DB *db = db_array[which_db];
-            lock_flags[which_db] = get_prelocked_flags(flags_array[which_db]);
-            remaining_flags[which_db] = flags_array[which_db] & ~lock_flags[which_db];
-
-            struct del_multiple_row_processor {
-                DB *m_db;
-                DB_TXN *m_txn;
-                uint32_t *m_remaining_flags;
-                uint32_t *m_lock_flags;
-                uint32_t m_which_db;
-                std::vector<DBT> &m_del_key_vec;
-                del_multiple_row_processor(DB *db, DB_TXN *txn, uint32_t *remaining_flags, uint32_t *lock_flags, uint32_t which_db, std::vector<DBT> &del_key_vec)
-                    : m_db(db), m_txn(txn), m_remaining_flags(remaining_flags), m_lock_flags(lock_flags), m_which_db(which_db), m_del_key_vec(del_key_vec) {}
-                int process(DBT *dest_key) const {
-                    if (m_remaining_flags[m_which_db] & ~DB_DELETE_ANY) {
-                        return EINVAL;
-                    }
-                    int r;
-                    bool error_if_missing = (bool)(!(m_remaining_flags[m_which_db]&DB_DELETE_ANY));
-                    if (error_if_missing) {
-                        //Check if the key exists in the db.
-                        r = db_getf_set(m_db, m_txn, m_lock_flags[m_which_db]|DB_SERIALIZABLE|DB_RMW, dest_key, ydb_getf_do_nothing, NULL);
-                        if (r != 0) return r;
-                    }
-
-                    //Do locking if necessary.
-                    if (m_db->i->lt && !(m_lock_flags[m_which_db] & DB_PRELOCKED_WRITE)) {
-                        //Needs locking
-                        r = toku_db_get_point_write_lock(m_db, m_txn, dest_key);
-                        if (r != 0) return r;
-                    }
-                    m_del_key_vec.push_back(*dest_key);
-                    return 0;
+                r = processor.check_key(&del_keys[which_db]);
+                if (r != 0) {
+                    goto cleanup;
                 }
-                static int call_process(void *extra, DBT *dest_key) {
-                    del_multiple_row_processor *e = static_cast<del_multiple_row_processor *>(extra);
-                    return extra->process(dest_key);
-                }
-            } processor(db, txn, remaining_flags, lock_flags, which_db, del_key_vecs[which_db]);
-
+            }
+        } else {
+            paranoid_invariant(env->i->generate_rows_for_del != NULL);
             if (db == src_db) {
-                del_key_vecs[which_db].push_back(*src_key);
+                del_keys[which_db] = *src_key;
+                r = processor.process(&del_keys[which_db]);
+                if (r != 0) {
+                    goto cleanup;
+                }
             } else {
-                //Generate the key
                 r = env->i->generate_rows_for_del(db, src_db, src_key, src_val, &processor, &processor.call_process);
                 if (r != 0) goto cleanup;
             }
-
-            brts[which_db] = db->i->ft_handle;
         }
 
-        if (indexer) {
-            toku_indexer_lock(indexer);
-        }
-        toku_multi_operation_client_lock();
-        if (num_dbs == 1) {
-            log_del_single(txn, brts[0], &del_keys[0]);
-        }
-        else {
-            log_del_multiple(txn, src_db, src_key, src_val, num_dbs, brts, del_keys);
-        }
-        if (r == 0) {
-            r = do_del_multiple(txn, num_dbs, db_array, del_keys, src_db, src_key);
-        }
-        toku_multi_operation_client_unlock();
-        if (indexer) {
-            toku_indexer_unlock(indexer);
-        }
+        brts[which_db] = db->i->ft_handle;
     }
 
-cleanup:
+    if (indexer) {
+        toku_indexer_lock(indexer);
+    }
+    toku_multi_operation_client_lock();
+    if (num_dbs == 1) {
+        log_del_single(txn, brts[0], &del_keys[0]);
+    }
+    else {
+        log_del_multiple(txn, src_db, src_key, src_val, num_dbs, brts, del_keys);
+    }
+    if (r == 0) {
+        r = do_del_multiple(txn, num_dbs, db_array, del_keys, del_key_vecs, src_db, src_key);
+    }
+    toku_multi_operation_client_unlock();
+    if (indexer) {
+        toku_indexer_unlock(indexer);
+    }
+
+ cleanup:
     if (r == 0)
         STATUS_VALUE(YDB_LAYER_NUM_MULTI_DELETES) += num_dbs;  // accountability 
     else
@@ -682,8 +669,10 @@ log_put_multiple(DB_TXN *txn, DB *src_db, const DBT *src_key, const DBT *src_val
     }
 }
 
+typedef std::pair<DBT, DBT> dbt_pair;
+
 static int
-do_put_multiple(DB_TXN *txn, uint32_t num_dbs, DB *db_array[], DBT keys[], DBT vals[], DB *src_db, const DBT *src_key) {
+do_put_multiple(DB_TXN *txn, uint32_t num_dbs, DB *db_array[], DBT keys[], DBT vals[], std::unique_ptr<std::vector<dbt_pair>[]> &kv_vecs, DB *src_db, const DBT *src_key) {
     int r = 0;
     TOKUTXN ttxn = db_txn_struct_i(txn)->tokutxn;
     for (uint32_t which_db = 0; r == 0 && which_db < num_dbs; which_db++) {
@@ -707,7 +696,14 @@ do_put_multiple(DB_TXN *txn, uint32_t num_dbs, DB *db_array[], DBT keys[], DBT v
             do_put = !toku_indexer_is_key_right_of_le_cursor(indexer, indexer_src_key);
         }
         if (r == 0 && do_put) {
-            toku_ft_maybe_insert(db->i->ft_handle, &keys[which_db], &vals[which_db], ttxn, false, ZERO_LSN, false, FT_INSERT);
+            if (kv_vecs) {
+                std::vector<dbt_pair> &kv_vec = kv_vecs[which_db];
+                for (std::vector<dbt_pair>::iterator it = kv_vec.begin(); it != kv_vec.end(); ++it) {
+                    toku_ft_maybe_insert(db->i->ft_handle, &it->first, &it->second, ttxn, false, ZERO_LSN, false, FT_INSERT);
+                }
+            } else {
+                toku_ft_maybe_insert(db->i->ft_handle, &keys[which_db], &vals[which_db], ttxn, false, ZERO_LSN, false, FT_INSERT);
+            }
         }
     }
     return r;
@@ -729,13 +725,14 @@ env_put_multiple_internal(
     int r;
     DBT put_keys[num_dbs];
     DBT put_vals[num_dbs];
+    std::unique_ptr<std::vector<dbt_pair>[]> put_kv_vecs(env->i->generate_rows_for_put == NULL
+                                                         ? NULL
+                                                         : new std::vector<dbt_pair>[num_dbs]);
     DB_INDEXER* indexer = NULL;
 
     HANDLE_PANICKED_ENV(env);
     HANDLE_READ_ONLY_TXN(txn);
 
-    uint32_t lock_flags[num_dbs];
-    uint32_t remaining_flags[num_dbs];
     FT_HANDLE brts[num_dbs];
 
     if (!txn || !num_dbs) {
@@ -756,45 +753,93 @@ env_put_multiple_internal(
     for (uint32_t which_db = 0; which_db < num_dbs; which_db++) {
         DB *db = db_array[which_db];
 
-        lock_flags[which_db] = get_prelocked_flags(flags_array[which_db]);
-        remaining_flags[which_db] = flags_array[which_db] & ~lock_flags[which_db];
+        uint32_t lock_flags = get_prelocked_flags(flags_array[which_db]);
+        uint32_t remaining_flags = flags_array[which_db] & ~lock_flags;
+
+        std::vector<dbt_pair> *put_kv_vec = put_kv_vecs ? &put_kv_vecs[which_db] : NULL;
+        struct put_multiple_row_processor {
+            DB *m_db;
+            DB_TXN *m_txn;
+            uint32_t m_remaining_flags;
+            uint32_t m_lock_flags;
+            std::vector<dbt_pair> *m_put_kv_vec;
+            put_multiple_row_processor(DB *db, DB_TXN *txn, uint32_t remaining_flags, uint32_t lock_flags, std::vector<dbt_pair> *put_kv_vec)
+                : m_db(db), m_txn(txn), m_remaining_flags(remaining_flags), m_lock_flags(lock_flags), m_put_kv_vec(put_kv_vec) {}
+            int check_kv(DBT *dest_key, DBT *dest_val) const {
+                int r;
+                // check size constraints
+                r = db_put_check_size_constraints(m_db, dest_key, dest_val);
+                if (r != 0) return r;
+
+                //Check overwrite constraints
+                r = db_put_check_overwrite_constraint(m_db, m_txn,
+                                                      dest_key,
+                                                      m_lock_flags, m_remaining_flags);
+                if (r != 0) return r;
+                if (m_remaining_flags == DB_NOOVERWRITE_NO_ERROR) {
+                    //put_multiple does not support delaying the no error, since we would
+                    //have to log the flag in the put_multiple.
+                    return EINVAL;
+                }
+
+                //Do locking if necessary. Do not grab the lock again if this DB had a unique
+                //check performed because the lock was already grabbed by its cursor callback.
+                if (m_db->i->lt && !(m_lock_flags & DB_PRELOCKED_WRITE) && !(m_remaining_flags & DB_NOOVERWRITE)) {
+                    //Needs locking
+                    r = toku_db_get_point_write_lock(m_db, m_txn, dest_key);
+                    if (r != 0) return r;
+                }
+                return 0;
+            }
+            int process(DBT *dest_key, DBT *dest_val) const {
+                int r = check_kv(dest_key, dest_val);
+                if (r != 0) {
+                    return r;
+                }
+                paranoid_invariant(m_put_kv_vec != NULL);
+                m_put_kv_vec->push_back(std::make_pair(*dest_key, *dest_val));
+                return 0;
+            }
+            static int call_process(void *extra, DBT *dest_key, DBT *dest_val) {
+                put_multiple_row_processor *e = static_cast<put_multiple_row_processor *>(extra);
+                return e->process(dest_key, dest_val);
+            }
+        } processor(db, txn, remaining_flags, lock_flags, put_kv_vec);
 
         //Generate the row
-        if (db == src_db) {
-            put_keys[which_db] = *src_key;
-            put_vals[which_db] = *src_val;
-        } else if (env->i->generate_row_for_put != NULL) {
-            r = env->i->generate_row_for_put(db, src_db, &keys[which_db], &vals[which_db], src_key, src_val);
-            if (r != 0) goto cleanup;
-            put_keys[which_db] = keys[which_db];
-            put_vals[which_db] = vals[which_db];            
+        if (env->i->generate_row_for_put != NULL) {
+            if (db == src_db) {
+                put_keys[which_db] = *src_key;
+                put_vals[which_db] = *src_val;
+                r = processor.check_kv(&put_keys[which_db], &put_vals[which_db]);
+                if (r != 0) {
+                    goto cleanup;
+                }
+            } else {
+                r = env->i->generate_row_for_put(db, src_db, &keys[which_db], &vals[which_db], src_key, src_val);
+                if (r != 0) goto cleanup;
+                put_keys[which_db] = keys[which_db];
+                put_vals[which_db] = vals[which_db];            
+                r = processor.check_kv(&put_keys[which_db], &put_vals[which_db]);
+                if (r != 0) {
+                    goto cleanup;
+                }
+            }
         } else {
             paranoid_invariant(env->i->generate_rows_for_put != NULL);
-            ...;
+            if (db == src_db) {
+                put_keys[which_db] = *src_key;
+                put_vals[which_db] = *src_val;
+                r = processor.process(&put_keys[which_db], &put_vals[which_db]);
+                if (r != 0) {
+                    goto cleanup;
+                }
+            } else {
+                r = env->i->generate_rows_for_put(db, src_db, src_key, src_val, &processor, &processor.call_process);
+                if (r != 0) goto cleanup;
+            }
         }
 
-        // check size constraints
-        r = db_put_check_size_constraints(db, &put_keys[which_db], &put_vals[which_db]);
-        if (r != 0) goto cleanup;
-
-        //Check overwrite constraints
-        r = db_put_check_overwrite_constraint(db, txn,
-                                              &put_keys[which_db],
-                                              lock_flags[which_db], remaining_flags[which_db]);
-        if (r != 0) goto cleanup;
-        if (remaining_flags[which_db] == DB_NOOVERWRITE_NO_ERROR) {
-            //put_multiple does not support delaying the no error, since we would
-            //have to log the flag in the put_multiple.
-            r = EINVAL; goto cleanup;
-        }
-
-        //Do locking if necessary. Do not grab the lock again if this DB had a unique
-        //check performed because the lock was already grabbed by its cursor callback.
-        if (db->i->lt && !(lock_flags[which_db] & DB_PRELOCKED_WRITE) && !(remaining_flags[which_db] & DB_NOOVERWRITE)) {
-            //Needs locking
-            r = toku_db_get_point_write_lock(db, txn, &put_keys[which_db]);
-            if (r != 0) goto cleanup;
-        }
         brts[which_db] = db->i->ft_handle;
     }
     
@@ -809,7 +854,7 @@ env_put_multiple_internal(
         log_put_multiple(txn, src_db, src_key, src_val, num_dbs, brts);
     }
     if (r == 0) {
-        r = do_put_multiple(txn, num_dbs, db_array, put_keys, put_vals, src_db, src_key);
+        r = do_put_multiple(txn, num_dbs, db_array, put_keys, put_vals, put_kv_vecs, src_db, src_key);
     }
     toku_multi_operation_client_unlock();
     if (indexer) {
@@ -853,110 +898,229 @@ env_update_multiple(DB_ENV *env, DB *src_db, DB_TXN *txn,
     }
 
     {
+        // Can't have a mix of generate_row and generate_rows.  That would really complicate things.
+        invariant((env->i->generate_row_for_put == NULL) == (env->i->generate_row_for_del == NULL));
+        invariant((env->i->generate_rows_for_put == NULL) == (env->i->generate_rows_for_del == NULL));
+        invariant((env->i->generate_row_for_put == NULL) != (env->i->generate_rows_for_put == NULL));
+
         uint32_t n_del_dbs = 0;
         DB *del_dbs[num_dbs];
         FT_HANDLE del_fts[num_dbs];
         DBT del_keys[num_dbs];
+        std::unique_ptr<std::vector<DBT>[]> del_key_vecs(env->i->generate_rows_for_del == NULL
+                                                         ? NULL
+                                                         : new std::vector<DBT>[num_dbs]);
         
         uint32_t n_put_dbs = 0;
         DB *put_dbs[num_dbs];
         FT_HANDLE put_fts[num_dbs];
         DBT put_keys[num_dbs];
         DBT put_vals[num_dbs];
-
-        uint32_t lock_flags[num_dbs];
-        uint32_t remaining_flags[num_dbs];
+        std::unique_ptr<std::vector<dbt_pair>[]> put_kv_vecs(env->i->generate_rows_for_put == NULL
+                                                             ? NULL
+                                                             : new std::vector<dbt_pair>[num_dbs]);
 
         for (uint32_t which_db = 0; which_db < num_dbs; which_db++) {
             DB *db = db_array[which_db];
             DBT curr_old_key, curr_new_key, curr_new_val;
             
-            lock_flags[which_db] = get_prelocked_flags(flags_array[which_db]);
-            remaining_flags[which_db] = flags_array[which_db] & ~lock_flags[which_db];
+            uint32_t lock_flags = get_prelocked_flags(flags_array[which_db]);
+            uint32_t remaining_flags = flags_array[which_db] & ~lock_flags;
 
             // keys[0..num_dbs-1] are the new keys
             // keys[num_dbs..2*num_dbs-1] are the old keys
             // vals[0..num_dbs-1] are the new vals
 
-            // Generate the old key and val
-            if (which_db + num_dbs >= num_keys) {
-                r = ENOMEM; goto cleanup;
-            }
-            if (db == src_db) {
-                curr_old_key = *old_src_key;
-            } else if (env->i->generate_row_for_put != NULL) {
-                r = env->i->generate_row_for_put(db, src_db, &keys[which_db + num_dbs], NULL, old_src_key, old_src_data);
-                if (r != 0) goto cleanup;
-                curr_old_key = keys[which_db + num_dbs];
-            } else {
-                paranoid_invariant(env->i->generate_rows_for_put != NULL);
-                ...;
-            }
-
-            // Generate the new key and val
-            if (which_db >= num_keys || which_db >= num_vals) {
-                r = ENOMEM; goto cleanup;
-            }
-            if (db == src_db) {
-                curr_new_key = *new_src_key;
-                curr_new_val = *new_src_data;
-            } else if (env->i->generate_row_for_put != NULL) {
-                r = env->i->generate_row_for_put(db, src_db, &keys[which_db], &vals[which_db], new_src_key, new_src_data);
-                if (r != 0) goto cleanup;
-                curr_new_key = keys[which_db];
-                curr_new_val = vals[which_db];
-            } else {
-                paranoid_invariant(env->i->generate_rows_for_put != NULL);
-                ...;
-            }
-            ft_compare_func cmpfun = toku_db_get_compare_fun(db);
-            bool key_eq = cmpfun(db, &curr_old_key, &curr_new_key) == 0;
-            bool key_bytes_eq = (curr_old_key.size == curr_new_key.size && 
-                                 (memcmp(curr_old_key.data, curr_new_key.data, curr_old_key.size) == 0)
-                                 );
-            if (!key_eq) {
-                //Check overwrite constraints only in the case where 
-                // the keys are not equal.
-                // If the keys are equal, then we do not care of the flag is DB_NOOVERWRITE or 0
-                r = db_put_check_overwrite_constraint(db, txn,
-                                                      &curr_new_key,
-                                                      lock_flags[which_db], remaining_flags[which_db]);
-                if (r != 0) goto cleanup;
-                if (remaining_flags[which_db] == DB_NOOVERWRITE_NO_ERROR) {
-                    //update_multiple does not support delaying the no error, since we would
-                    //have to log the flag in the put_multiple.
-                    r = EINVAL; goto cleanup;
+            if (env->i->generate_row_for_put != NULL) {
+                // Generate the old key and val
+                if (which_db + num_dbs >= num_keys) {
+                    r = ENOMEM; goto cleanup;
                 }
-
-                // lock old key
-                if (db->i->lt && !(lock_flags[which_db] & DB_PRELOCKED_WRITE)) {
-                    r = toku_db_get_point_write_lock(db, txn, &curr_old_key);
+                if (db == src_db) {
+                    curr_old_key = *old_src_key;
+                } else {
+                    r = env->i->generate_row_for_put(db, src_db, &keys[which_db + num_dbs], NULL, old_src_key, old_src_data);
                     if (r != 0) goto cleanup;
+                    curr_old_key = keys[which_db + num_dbs];
                 }
-                del_dbs[n_del_dbs] = db;
-                del_fts[n_del_dbs] = db->i->ft_handle;
-                del_keys[n_del_dbs] = curr_old_key;
-                n_del_dbs++;
+
+                // Generate the new key and val
+                if (which_db >= num_keys || which_db >= num_vals) {
+                    r = ENOMEM; goto cleanup;
+                }
+                if (db == src_db) {
+                    curr_new_key = *new_src_key;
+                    curr_new_val = *new_src_data;
+                } else {
+                    r = env->i->generate_row_for_put(db, src_db, &keys[which_db], &vals[which_db], new_src_key, new_src_data);
+                    if (r != 0) goto cleanup;
+                    curr_new_key = keys[which_db];
+                    curr_new_val = vals[which_db];
+                }
+                ft_compare_func cmpfun = toku_db_get_compare_fun(db);
+                bool key_eq = cmpfun(db, &curr_old_key, &curr_new_key) == 0;
+                bool key_bytes_eq = (curr_old_key.size == curr_new_key.size && 
+                                     (memcmp(curr_old_key.data, curr_new_key.data, curr_old_key.size) == 0)
+                                     );
+                if (!key_eq) {
+                    //Check overwrite constraints only in the case where 
+                    // the keys are not equal.
+                    // If the keys are equal, then we do not care of the flag is DB_NOOVERWRITE or 0
+                    r = db_put_check_overwrite_constraint(db, txn,
+                                                          &curr_new_key,
+                                                          lock_flags, remaining_flags);
+                    if (r != 0) goto cleanup;
+                    if (remaining_flags == DB_NOOVERWRITE_NO_ERROR) {
+                        //update_multiple does not support delaying the no error, since we would
+                        //have to log the flag in the put_multiple.
+                        r = EINVAL; goto cleanup;
+                    }
+
+                    // lock old key
+                    if (db->i->lt && !(lock_flags & DB_PRELOCKED_WRITE)) {
+                        r = toku_db_get_point_write_lock(db, txn, &curr_old_key);
+                        if (r != 0) goto cleanup;
+                    }
+                    del_dbs[n_del_dbs] = db;
+                    del_fts[n_del_dbs] = db->i->ft_handle;
+                    del_keys[n_del_dbs] = curr_old_key;
+                    n_del_dbs++;
                 
-            }
+                }
 
-            // we take a shortcut and avoid generating the old val
-            // we assume that any new vals with size > 0 are different than the old val
-            // if (!key_eq || !(dbt_cmp(&vals[which_db], &vals[which_db + num_dbs]) == 0)) {
-            if (!key_bytes_eq || curr_new_val.size > 0) {
-                r = db_put_check_size_constraints(db, &curr_new_key, &curr_new_val);
-                if (r != 0) goto cleanup;
+                // we take a shortcut and avoid generating the old val
+                // we assume that any new vals with size > 0 are different than the old val
+                // if (!key_eq || !(dbt_cmp(&vals[which_db], &vals[which_db + num_dbs]) == 0)) {
+                if (!key_bytes_eq || curr_new_val.size > 0) {
+                    r = db_put_check_size_constraints(db, &curr_new_key, &curr_new_val);
+                    if (r != 0) goto cleanup;
 
-                // lock new key
-                if (db->i->lt && !(lock_flags[which_db] & DB_PRELOCKED_WRITE)) {
-                    r = toku_db_get_point_write_lock(db, txn, &curr_new_key);
+                    // lock new key
+                    if (db->i->lt && !(lock_flags & DB_PRELOCKED_WRITE)) {
+                        r = toku_db_get_point_write_lock(db, txn, &curr_new_key);
+                        if (r != 0) goto cleanup;
+                    }
+                    put_dbs[n_put_dbs] = db;
+                    put_fts[n_put_dbs] = db->i->ft_handle;
+                    put_keys[n_put_dbs] = curr_new_key;
+                    put_vals[n_put_dbs] = curr_new_val;
+                    n_put_dbs++;
+                }
+            } else {
+                paranoid_invariant(env->i->generate_rows_for_put != NULL);
+                struct update_multiple_row_processor {
+                    DB *m_db;
+                    DB_TXN *m_txn;
+                    uint32_t m_remaining_flags;
+                    uint32_t m_lock_flags;
+                    std::vector<DBT> &m_del_key_vec;
+                    std::vector<dbt_pair> &m_put_kv_vec;
+                    ft_compare_func m_cmpfun;
+                    update_multiple_row_processor(DB *db, DB_TXN *txn, uint32_t remaining_flags, uint32_t lock_flags, std::vector<DBT> &del_key_vec, std::vector<dbt_pair> &put_kv_vec)
+                        : m_db(db), m_txn(txn), m_remaining_flags(remaining_flags), m_lock_flags(lock_flags), m_del_key_vec(del_key_vec), m_put_kv_vec(put_kv_vec) {
+                        m_cmpfun = toku_db_get_compare_fun(m_db);
+                    }
+                    int check_old_key(DBT *dest_key) const {
+                        int r;
+                        if (m_remaining_flags == DB_NOOVERWRITE_NO_ERROR) {
+                            //update_multiple does not support delaying the no error, since we would
+                            //have to log the flag in the put_multiple.
+                            return EINVAL;
+                        }
+
+                        // lock old key
+                        if (m_db->i->lt && !(m_lock_flags & DB_PRELOCKED_WRITE)) {
+                            r = toku_db_get_point_write_lock(m_db, m_txn, dest_key);
+                            if (r != 0) return r;
+                        }
+                        return 0;
+                    }
+                    int process_old_row(DBT *dest_key, DBT *dest_val __attribute__((unused))) const {
+                        int r = check_old_key(dest_key);
+                        if (r != 0) {
+                            return r;
+                        }
+                        m_del_key_vec.push_back(*dest_key);
+                        return 0;
+                    }
+                    static int call_process_old_row(void *extra, DBT *dest_key, DBT *dest_val) {
+                        update_multiple_row_processor *e = static_cast<update_multiple_row_processor *>(extra);
+                        return e->process_old_row(dest_key, dest_val);
+                    }
+                    int check_new_row(DBT *dest_key, DBT *dest_val) const {
+                        int r = db_put_check_size_constraints(m_db, dest_key, dest_val);
+                        if (r != 0) return r;
+
+                        bool equals_some_old_key = false;
+                        for (std::vector<DBT>::iterator it = m_del_key_vec.begin(); it != m_del_key_vec.end() && !equals_some_old_key; ++it) {
+                            if (m_cmpfun(m_db, &(*it), dest_key) == 0) {
+                                equals_some_old_key = true;
+                            }
+                        }
+                        if (!equals_some_old_key) {
+                            r = db_put_check_overwrite_constraint(m_db, m_txn,
+                                                                  dest_key,
+                                                                  m_lock_flags, m_remaining_flags);
+                            if (r != 0) return r;
+
+                            if (m_db->i->lt && !(m_lock_flags & DB_PRELOCKED_WRITE)) {
+                                r = toku_db_get_point_write_lock(m_db, m_txn, dest_key);
+                                if (r != 0) return r;
+                            }
+                        }
+                        return 0;
+                    }
+                    int process_new_row(DBT *dest_key, DBT *dest_val) const {
+                        int r = check_new_row(dest_key, dest_val);
+                        if (r != 0) {
+                            return r;
+                        }
+                        m_put_kv_vec.push_back(std::make_pair(*dest_key, *dest_val));
+                        return 0;
+                    }
+                    static int call_process_new_row(void *extra, DBT *dest_key, DBT *dest_val) {
+                        update_multiple_row_processor *e = static_cast<update_multiple_row_processor *>(extra);
+                        return e->process_new_row(dest_key, dest_val);
+                    }
+                } processor(db, txn, remaining_flags, lock_flags, del_key_vecs[which_db], put_kv_vecs[which_db]);
+
+                // Generate the old key and val
+                if (which_db + num_dbs >= num_keys) {
+                    r = ENOMEM; goto cleanup;
+                }
+                if (db == src_db) {
+                    del_keys[which_db] = *old_src_key;
+                    r = processor.check_old_key(&del_keys[which_db]);
+                    if (r != 0) {
+                        goto cleanup;
+                    }
+                } else {
+                    r = env->i->generate_rows_for_put(db, src_db, old_src_key, old_src_data, &processor, &processor.call_process_old_row);
                     if (r != 0) goto cleanup;
                 }
-                put_dbs[n_put_dbs] = db;
-                put_fts[n_put_dbs] = db->i->ft_handle;
-                put_keys[n_put_dbs] = curr_new_key;
-                put_vals[n_put_dbs] = curr_new_val;
-                n_put_dbs++;
+                del_dbs[which_db] = db;
+                del_fts[which_db] = db->i->ft_handle;
+
+                // Generate the new key and val
+                if (which_db >= num_keys || which_db >= num_vals) {
+                    r = ENOMEM; goto cleanup;
+                }
+                if (db == src_db) {
+                    put_keys[which_db] = *new_src_key;
+                    put_vals[which_db] = *new_src_data;
+                    r = processor.check_new_row(&put_keys[which_db], &put_vals[which_db]);
+                    if (r != 0) {
+                        goto cleanup;
+                    }
+                } else {
+                    r = env->i->generate_rows_for_put(db, src_db, new_src_key, new_src_data, &processor, &processor.call_process_new_row);
+                    if (r != 0) goto cleanup;
+                }
+                put_dbs[which_db] = db;
+                put_fts[which_db] = db->i->ft_handle;
+
+                ++n_del_dbs;
+                ++n_put_dbs;
             }
         }
         if (indexer) {
@@ -970,7 +1134,7 @@ env_update_multiple(DB_ENV *env, DB *src_db, DB_TXN *txn,
                 log_del_multiple(txn, src_db, old_src_key, old_src_data, n_del_dbs, del_fts, del_keys);
             }
             if (r == 0) {
-                r = do_del_multiple(txn, n_del_dbs, del_dbs, del_keys, src_db, old_src_key);
+                r = do_del_multiple(txn, n_del_dbs, del_dbs, del_keys, del_key_vecs, src_db, old_src_key);
             }
         }
 
@@ -980,7 +1144,7 @@ env_update_multiple(DB_ENV *env, DB *src_db, DB_TXN *txn,
             else
                 log_put_multiple(txn, src_db, new_src_key, new_src_data, n_put_dbs, put_fts);
             if (r == 0)
-                r = do_put_multiple(txn, n_put_dbs, put_dbs, put_keys, put_vals, src_db, new_src_key);
+                r = do_put_multiple(txn, n_put_dbs, put_dbs, put_keys, put_vals, put_kv_vecs, src_db, new_src_key);
         }
         toku_multi_operation_client_unlock();
         if (indexer) {

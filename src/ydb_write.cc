@@ -509,7 +509,6 @@ env_del_multiple(
     uint32_t *flags_array) 
 {
     int r;
-    DBT del_keys[num_dbs];
     DB_INDEXER* indexer = NULL;
 
     HANDLE_PANICKED_ENV(env);
@@ -533,59 +532,131 @@ env_del_multiple(
         goto cleanup;
     }
 
+    if (env->i->generate_row_for_del != NULL) {
+        DBT del_keys[num_dbs];
+        for (uint32_t which_db = 0; which_db < num_dbs; which_db++) {
+            DB *db = db_array[which_db];
+            lock_flags[which_db] = get_prelocked_flags(flags_array[which_db]);
+            remaining_flags[which_db] = flags_array[which_db] & ~lock_flags[which_db];
 
-    for (uint32_t which_db = 0; which_db < num_dbs; which_db++) {
-        DB *db = db_array[which_db];
-        lock_flags[which_db] = get_prelocked_flags(flags_array[which_db]);
-        remaining_flags[which_db] = flags_array[which_db] & ~lock_flags[which_db];
+            if (db == src_db) {
+                del_keys[which_db] = *src_key;
+            } else {
+                //Generate the key
+                r = env->i->generate_row_for_del(db, src_db, &keys[which_db], src_key, src_val);
+                if (r != 0) goto cleanup;
+                del_keys[which_db] = keys[which_db];
+            }
 
-        if (db == src_db) {
-            del_keys[which_db] = *src_key;
+            if (remaining_flags[which_db] & ~DB_DELETE_ANY) {
+                r = EINVAL;
+                goto cleanup;
+            }
+            bool error_if_missing = (bool)(!(remaining_flags[which_db]&DB_DELETE_ANY));
+            if (error_if_missing) {
+                //Check if the key exists in the db.
+                r = db_getf_set(db, txn, lock_flags[which_db]|DB_SERIALIZABLE|DB_RMW, &del_keys[which_db], ydb_getf_do_nothing, NULL);
+                if (r != 0) goto cleanup;
+            }
+
+            //Do locking if necessary.
+            if (db->i->lt && !(lock_flags[which_db] & DB_PRELOCKED_WRITE)) {
+                //Needs locking
+                r = toku_db_get_point_write_lock(db, txn, &del_keys[which_db]);
+                if (r != 0) goto cleanup;
+            }
+            brts[which_db] = db->i->ft_handle;
+        }
+
+        if (indexer) {
+            toku_indexer_lock(indexer);
+        }
+        toku_multi_operation_client_lock();
+        if (num_dbs == 1) {
+            log_del_single(txn, brts[0], &del_keys[0]);
         }
         else {
-            //Generate the key
-            r = env->i->generate_row_for_del(db, src_db, &keys[which_db], src_key, src_val);
-            ...;
-            if (r != 0) goto cleanup;
-            del_keys[which_db] = keys[which_db];
+            log_del_multiple(txn, src_db, src_key, src_val, num_dbs, brts, del_keys);
+        }
+        if (r == 0) {
+            r = do_del_multiple(txn, num_dbs, db_array, del_keys, src_db, src_key);
+        }
+        toku_multi_operation_client_unlock();
+        if (indexer) {
+            toku_indexer_unlock(indexer);
+        }
+    } else {
+        paranoid_invariant(env->i->generate_rows_for_del != NULL);
+        std::vector<DBT> del_key_vecs[num_dbs];
+        for (uint32_t which_db = 0; which_db < num_dbs; which_db++) {
+            DB *db = db_array[which_db];
+            lock_flags[which_db] = get_prelocked_flags(flags_array[which_db]);
+            remaining_flags[which_db] = flags_array[which_db] & ~lock_flags[which_db];
+
+            struct del_multiple_row_processor {
+                DB *m_db;
+                DB_TXN *m_txn;
+                uint32_t *m_remaining_flags;
+                uint32_t *m_lock_flags;
+                uint32_t m_which_db;
+                std::vector<DBT> &m_del_key_vec;
+                del_multiple_row_processor(DB *db, DB_TXN *txn, uint32_t *remaining_flags, uint32_t *lock_flags, uint32_t which_db, std::vector<DBT> &del_key_vec)
+                    : m_db(db), m_txn(txn), m_remaining_flags(remaining_flags), m_lock_flags(lock_flags), m_which_db(which_db), m_del_key_vec(del_key_vec) {}
+                int process(DBT *dest_key) const {
+                    if (m_remaining_flags[m_which_db] & ~DB_DELETE_ANY) {
+                        return EINVAL;
+                    }
+                    int r;
+                    bool error_if_missing = (bool)(!(m_remaining_flags[m_which_db]&DB_DELETE_ANY));
+                    if (error_if_missing) {
+                        //Check if the key exists in the db.
+                        r = db_getf_set(m_db, m_txn, m_lock_flags[m_which_db]|DB_SERIALIZABLE|DB_RMW, dest_key, ydb_getf_do_nothing, NULL);
+                        if (r != 0) return r;
+                    }
+
+                    //Do locking if necessary.
+                    if (m_db->i->lt && !(m_lock_flags[m_which_db] & DB_PRELOCKED_WRITE)) {
+                        //Needs locking
+                        r = toku_db_get_point_write_lock(m_db, m_txn, dest_key);
+                        if (r != 0) return r;
+                    }
+                    m_del_key_vec.push_back(*dest_key);
+                    return 0;
+                }
+                static int call_process(void *extra, DBT *dest_key) {
+                    del_multiple_row_processor *e = static_cast<del_multiple_row_processor *>(extra);
+                    return extra->process(dest_key);
+                }
+            } processor(db, txn, remaining_flags, lock_flags, which_db, del_key_vecs[which_db]);
+
+            if (db == src_db) {
+                del_key_vecs[which_db].push_back(*src_key);
+            } else {
+                //Generate the key
+                r = env->i->generate_rows_for_del(db, src_db, src_key, src_val, &processor, &processor.call_process);
+                if (r != 0) goto cleanup;
+            }
+
+            brts[which_db] = db->i->ft_handle;
         }
 
-        if (remaining_flags[which_db] & ~DB_DELETE_ANY) {
-            r = EINVAL;
-            goto cleanup;
+        if (indexer) {
+            toku_indexer_lock(indexer);
         }
-        bool error_if_missing = (bool)(!(remaining_flags[which_db]&DB_DELETE_ANY));
-        if (error_if_missing) {
-            //Check if the key exists in the db.
-            r = db_getf_set(db, txn, lock_flags[which_db]|DB_SERIALIZABLE|DB_RMW, &del_keys[which_db], ydb_getf_do_nothing, NULL);
-            if (r != 0) goto cleanup;
+        toku_multi_operation_client_lock();
+        if (num_dbs == 1) {
+            log_del_single(txn, brts[0], &del_keys[0]);
         }
-
-        //Do locking if necessary.
-        if (db->i->lt && !(lock_flags[which_db] & DB_PRELOCKED_WRITE)) {
-            //Needs locking
-            r = toku_db_get_point_write_lock(db, txn, &del_keys[which_db]);
-            if (r != 0) goto cleanup;
+        else {
+            log_del_multiple(txn, src_db, src_key, src_val, num_dbs, brts, del_keys);
         }
-        brts[which_db] = db->i->ft_handle;
-    }
-
-    if (indexer) {
-        toku_indexer_lock(indexer);
-    }
-    toku_multi_operation_client_lock();
-    if (num_dbs == 1) {
-        log_del_single(txn, brts[0], &del_keys[0]);
-    }
-    else {
-        log_del_multiple(txn, src_db, src_key, src_val, num_dbs, brts, del_keys);
-    }
-    if (r == 0) {
-        r = do_del_multiple(txn, num_dbs, db_array, del_keys, src_db, src_key);
-    }
-    toku_multi_operation_client_unlock();
-    if (indexer) {
-        toku_indexer_unlock(indexer);
+        if (r == 0) {
+            r = do_del_multiple(txn, num_dbs, db_array, del_keys, src_db, src_key);
+        }
+        toku_multi_operation_client_unlock();
+        if (indexer) {
+            toku_indexer_unlock(indexer);
+        }
     }
 
 cleanup:
@@ -692,13 +763,14 @@ env_put_multiple_internal(
         if (db == src_db) {
             put_keys[which_db] = *src_key;
             put_vals[which_db] = *src_val;
-        }
-        else {
+        } else if (env->i->generate_row_for_put != NULL) {
             r = env->i->generate_row_for_put(db, src_db, &keys[which_db], &vals[which_db], src_key, src_val);
-            ...;
             if (r != 0) goto cleanup;
             put_keys[which_db] = keys[which_db];
             put_vals[which_db] = vals[which_db];            
+        } else {
+            paranoid_invariant(env->i->generate_rows_for_put != NULL);
+            ...;
         }
 
         // check size constraints
@@ -812,13 +884,15 @@ env_update_multiple(DB_ENV *env, DB *src_db, DB_TXN *txn,
             }
             if (db == src_db) {
                 curr_old_key = *old_src_key;
-            }
-            else {
+            } else if (env->i->generate_row_for_put != NULL) {
                 r = env->i->generate_row_for_put(db, src_db, &keys[which_db + num_dbs], NULL, old_src_key, old_src_data);
-                ...;
                 if (r != 0) goto cleanup;
                 curr_old_key = keys[which_db + num_dbs];
+            } else {
+                paranoid_invariant(env->i->generate_rows_for_put != NULL);
+                ...;
             }
+
             // Generate the new key and val
             if (which_db >= num_keys || which_db >= num_vals) {
                 r = ENOMEM; goto cleanup;
@@ -826,13 +900,14 @@ env_update_multiple(DB_ENV *env, DB *src_db, DB_TXN *txn,
             if (db == src_db) {
                 curr_new_key = *new_src_key;
                 curr_new_val = *new_src_data;
-            }
-            else {
+            } else if (env->i->generate_row_for_put != NULL) {
                 r = env->i->generate_row_for_put(db, src_db, &keys[which_db], &vals[which_db], new_src_key, new_src_data);
-                ...;
                 if (r != 0) goto cleanup;
                 curr_new_key = keys[which_db];
                 curr_new_val = vals[which_db];
+            } else {
+                paranoid_invariant(env->i->generate_rows_for_put != NULL);
+                ...;
             }
             ft_compare_func cmpfun = toku_db_get_compare_fun(db);
             bool key_eq = cmpfun(db, &curr_old_key, &curr_new_key) == 0;

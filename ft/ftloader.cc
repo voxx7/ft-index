@@ -1348,7 +1348,7 @@ static int process_primary_rows_internal (FTLOADER bl, struct rowset *primary_ro
                         break;
                     }
                 } else {
-                    paranoid_invariant(bl->generate_rows_for_put != NULL);
+                    paranoid_invariant_notnull(bl->generate_rows_for_put);
                     r = bl->generate_rows_for_put(bl->dbs[i], bl->src_db, &pkey, &pval, &processor, &processor.call_process);
                     if (r != 0) {
                         error_codes[i] = r;

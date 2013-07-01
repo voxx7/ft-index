@@ -584,7 +584,7 @@ env_del_multiple(
                 if (r != 0) {
                     return r;
                 }
-                paranoid_invariant(m_del_key_vec != NULL);
+                paranoid_invariant_notnull(m_del_key_vec);
                 m_del_key_vec->push_back(*dest_key);
                 return 0;
             }
@@ -612,7 +612,7 @@ env_del_multiple(
                 }
             }
         } else {
-            paranoid_invariant(env->i->generate_rows_for_del != NULL);
+            paranoid_invariant_notnull(env->i->generate_rows_for_del);
             if (db == src_db) {
                 del_keys[which_db] = *src_key;
                 r = processor.process(&del_keys[which_db]);
@@ -796,7 +796,7 @@ env_put_multiple_internal(
                 if (r != 0) {
                     return r;
                 }
-                paranoid_invariant(m_put_kv_vec != NULL);
+                paranoid_invariant_notnull(m_put_kv_vec);
                 m_put_kv_vec->push_back(std::make_pair(*dest_key, *dest_val));
                 return 0;
             }
@@ -826,7 +826,7 @@ env_put_multiple_internal(
                 }
             }
         } else {
-            paranoid_invariant(env->i->generate_rows_for_put != NULL);
+            paranoid_invariant_notnull(env->i->generate_rows_for_put);
             if (db == src_db) {
                 put_keys[which_db] = *src_key;
                 put_vals[which_db] = *src_val;
@@ -1007,7 +1007,7 @@ env_update_multiple(DB_ENV *env, DB *src_db, DB_TXN *txn,
                     n_put_dbs++;
                 }
             } else {
-                paranoid_invariant(env->i->generate_rows_for_put != NULL);
+                paranoid_invariant_notnull(env->i->generate_rows_for_put);
                 struct update_multiple_row_processor {
                     DB *m_db;
                     DB_TXN *m_txn;

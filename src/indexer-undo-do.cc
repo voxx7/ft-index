@@ -563,7 +563,7 @@ indexer_generate_hot_key_val_for_put(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE u
             result = processor.process(&indexer->i->hotkey, &indexer->i->hotval);
         }
     } else {
-        paranoid_invariant(env->i->generate_rows_for_put != NULL);
+        paranoid_invariant_notnull(env->i->generate_rows_for_put);
         result = env->i->generate_rows_for_put(hotdb, indexer->i->src_db, &srckey, &srcval, &processor, &processor.call_process);
     }
     toku_destroy_dbt(&srckey);
@@ -593,7 +593,7 @@ indexer_generate_hot_key_for_del(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, 
             result = processor.process(&indexer->i->hotkey);
         }
     } else {
-        paranoid_invariant(env->i->generate_rows_for_del != NULL);
+        paranoid_invariant_notnull(env->i->generate_rows_for_del);
         result = env->i->generate_rows_for_del(hotdb, indexer->i->src_db, &srckey, &srcval, &processor, &processor.call_process);
     }
     toku_destroy_dbt(&srckey);

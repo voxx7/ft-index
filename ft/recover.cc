@@ -1074,7 +1074,7 @@ static int toku_recover_enq_insert_multiple (struct logtype_enq_insert_multiple 
                     r = processor.process(&dest_key, &dest_val);
                     assert(r == 0);
                 } else {
-                    paranoid_invariant(renv->generate_rows_for_put != NULL);
+                    paranoid_invariant_notnull(renv->generate_rows_for_put);
                     r = renv->generate_rows_for_put(db, src_db, &src_key, &src_val, &processor, &processor.call_process);
                     assert(r == 0);
                 }
@@ -1157,7 +1157,7 @@ static int toku_recover_enq_delete_multiple (struct logtype_enq_delete_multiple 
                     r = processor.process(&dest_key);
                     assert(r == 0);
                 } else {
-                    paranoid_invariant(renv->generate_rows_for_del != NULL);
+                    paranoid_invariant_notnull(renv->generate_rows_for_del);
                     r = renv->generate_rows_for_del(db, src_db, &src_key, &src_val, &processor, &processor.call_process);
                     assert(r == 0);
                 }

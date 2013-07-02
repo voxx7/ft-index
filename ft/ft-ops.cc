@@ -4569,13 +4569,11 @@ toku_apply_ancestors_messages_to_node (
     paranoid_invariant(node->height == 0);
 
     TXNID oldest_referenced_xid = ancestors->node->oldest_referenced_xid_known;
-#if 0
     for (ANCESTORS curr_ancestors = ancestors; curr_ancestors; curr_ancestors = curr_ancestors->next) {
         if (curr_ancestors->node->oldest_referenced_xid_known > oldest_referenced_xid) {
             oldest_referenced_xid = curr_ancestors->node->oldest_referenced_xid_known;
         }
     }
-#endif
 
     if (!node->dirty && child_to_read >= 0) {
         paranoid_invariant(BP_STATE(node, child_to_read) == PT_AVAIL);

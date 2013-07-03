@@ -455,8 +455,7 @@ indexer_undo_do_provisional(DB_INDEXER *indexer, DB *hotdb, ULEHANDLE ule, struc
                     case TOKUTXN_COMMITTING:
                     case TOKUTXN_RETIRED:
                         result = indexer_ft_insert_committed(m_indexer, m_hotdb, dest_key, dest_val, m_xids);
-                        if (result == 0)
-                            indexer_commit_keys_add(&m_indexer->i->commit_keys, dest_key->size, dest_key->data);
+                        // no need to send a commit: we do implicit commits on inserts
                         break;
                     case TOKUTXN_ABORTING: // can not happen since we stop processing the leaf entry if the outer most xr is aborting
                         assert(0);

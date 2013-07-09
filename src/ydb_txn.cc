@@ -328,10 +328,10 @@ static int
 locked_txn_commit_with_progress(DB_TXN *txn, uint32_t flags,
                                 TXN_PROGRESS_POLL_FUNCTION poll, void* poll_extra) {
     bool holds_mo_lock = false;
-    if (!toku_txn_is_read_only(db_txn_struct_i(txn)->tokutxn)) {
-        // A readonly transaction does no logging, and therefore does not
-        // need the MO lock.
-        toku_multi_operation_client_lock();
+    bool low_priority = false;
+    TOKUTXN tokutxn = db_txn_struct_i(txn)->tokutxn;
+    if (!toku_txn_is_read_only(tokutxn)) {
+        // A readonly transaction does no logging, and therefore does not need the MO lock.
         holds_mo_lock = true;
         if (toku_txn_has_spilled_rollback(tokutxn)) {
             low_priority = true;
@@ -358,11 +358,9 @@ locked_txn_abort_with_progress(DB_TXN *txn,
     // But released here so we don't have to hold additional state.
     bool holds_mo_lock = false;
     bool low_priority = false;
-    TOKUTXN tokutxn = &db_txn_struct_i(txn)->tokutxn;
+    TOKUTXN tokutxn = db_txn_struct_i(txn)->tokutxn;
     if (!toku_txn_is_read_only(tokutxn)) {
-        // A readonly transaction does no logging, and therefore does not
-        // need the MO lock.
-        toku_multi_operation_client_lock();
+        // A readonly transaction does no logging, and therefore does not need the MO lock.
         holds_mo_lock = true;
         if (toku_txn_has_spilled_rollback(tokutxn)) {
             low_priority = true;

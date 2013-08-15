@@ -94,6 +94,12 @@ PATENT RIGHTS GRANT:
 #include <string.h>
 #include <libgen.h>
 
+char *stpncpy(char *dest, const char *src, size_t n) {
+	char *d = dest;
+	while (d-dest < n && *src)
+		*d++ = *src++;
+	return d;
+}
 const char *toku_test_filename(const char *default_filename) {
     const char *filename = getenv("TOKU_TEST_FILENAME");
     if (filename == nullptr) {

@@ -372,6 +372,14 @@ toku_os_open_direct(const char *path, int oflag, int mode) {
             perror("setting F_NOCACHE");
         }
     }
+#elif defined(DIRECTIO_ON)
+    rval = toku_os_open(path, oflag, mode);
+    if (rval >= 0) {
+        int r = fcntl(rval, DIRECTIO_ON);
+        if (r == -1) {
+            perror("setting DIRECTIO_ON");
+        }
+    }
 #else
 # error "No direct I/O implementation found."
 #endif
@@ -479,7 +487,12 @@ static void file_fsync_internal (int fd, uint64_t *duration_p) {
 void toku_file_fsync_without_accounting(int fd) {
     file_fsync_internal(fd, NULL);
 }
-
+#ifdef __sun__
+static inline int dirfd (DIR *dir)
+{
+	return dir->d_fd;
+}
+#endif
 void toku_fsync_dirfd_without_accounting(DIR *dir) {
     int fd = dirfd(dir);
     toku_file_fsync_without_accounting(fd);

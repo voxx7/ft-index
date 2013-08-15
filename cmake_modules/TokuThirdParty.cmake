@@ -5,7 +5,7 @@ set(JEMALLOC_SOURCE_DIR "${TokuDB_SOURCE_DIR}/third_party/jemalloc" CACHE FILEPA
 if (NOT EXISTS "${JEMALLOC_SOURCE_DIR}/configure")
   message(FATAL_ERROR "Can't find jemalloc sources.  Please check them out to ${JEMALLOC_SOURCE_DIR} or modify JEMALLOC_SOURCE_DIR.")
 endif ()
-set(jemalloc_configure_opts "CC=${CMAKE_C_COMPILER}" "--with-jemalloc-prefix=" "--with-private-namespace=tokudb_jemalloc_internal_" "--enable-cc-silence")
+set(jemalloc_configure_opts "CC=${CMAKE_C_COMPILER} -m64" "--with-jemalloc-prefix=" "--with-private-namespace=tokudb_jemalloc_internal_" "--enable-cc-silence")
 option(JEMALLOC_DEBUG "Build jemalloc with --enable-debug." OFF)
 if (JEMALLOC_DEBUG)
   list(APPEND jemalloc_configure_opts --enable-debug)
@@ -42,7 +42,7 @@ if (APPLE)
   list(APPEND xz_configure_opts --disable-assembler)
 endif ()
 
-list(APPEND xz_configure_opts CC=${CMAKE_C_COMPILER})
+list(APPEND xz_configure_opts "CC=${CMAKE_C_COMPILER} -m64")
 if (NOT CMAKE_BUILD_TYPE MATCHES Release)
   list(APPEND xz_configure_opts --enable-debug)
 endif ()
@@ -65,7 +65,7 @@ FILE(GLOB XZ_ALL_FILES ${XZ_SOURCE_DIR}/*)
 ExternalProject_Add(build_lzma
     PREFIX xz
     DOWNLOAD_COMMAND
-        cp -au "${XZ_ALL_FILES}" "<SOURCE_DIR>/"
+        cp -rp "${XZ_ALL_FILES}" "<SOURCE_DIR>/"
     CONFIGURE_COMMAND
         "<SOURCE_DIR>/configure" ${xz_configure_opts}
         "--prefix=${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/xz"

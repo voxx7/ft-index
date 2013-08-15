@@ -118,6 +118,11 @@ PATENT RIGHTS GRANT:
 # define __LITTLE_ENDIAN __DARWIN_LITTLE_ENDIAN
 # define __BIG_ENDIAN __DARWIN_BIG_ENDIAN
 #endif
+#include <sys/isa_defs.h>
+#define __BYTE_ORDER 1234
+#define __LITTLE_ENDIAN 1234
+#define __BIG_ENDIAN 4321
+
 #if !defined(__BYTE_ORDER) || \
     !defined(__LITTLE_ENDIAN) || \
     !defined(__BIG_ENDIAN)

@@ -100,12 +100,12 @@ PATENT RIGHTS GRANT:
 # include <sys/malloc.h>
 #endif
 #include <dlfcn.h>
-#if !TOKU_WINDOWS
+#if !TOKU_WINDOWS && !defined(__sun)
 #include <execinfo.h>
 #endif
 
 
-#if !TOKU_WINDOWS
+#if !TOKU_WINDOWS && !defined(__sun)
 #define N_POINTERS 1000
 // These are statically allocated so that the backtrace can run without any calls to malloc()
 static void *backtrace_pointers[N_POINTERS];
@@ -134,7 +134,6 @@ void toku_assert_set_fpointers(int (*toku_maybe_get_engine_status_text_pointer)(
     engine_status_num_rows = num_rows;
 }
 
-bool toku_gdb_dump_on_assert = false;
 void (*do_assert_hook)(void) = NULL;
 
 static void toku_do_backtrace_abort(void) __attribute__((noreturn));
@@ -143,7 +142,7 @@ static void
 toku_do_backtrace_abort(void) {
 
     // backtrace
-#if !TOKU_WINDOWS
+#if !TOKU_WINDOWS && !defined(__sun)
     int n = backtrace(backtrace_pointers, N_POINTERS);
     fprintf(stderr, "Backtrace: (Note: toku_do_assert=0x%p)\n", toku_do_assert); fflush(stderr);
     backtrace_symbols_fd(backtrace_pointers, n, fileno(stderr));
@@ -165,11 +164,7 @@ toku_do_backtrace_abort(void) {
         malloc_stats_f();
     }
     fflush(stderr);	    
-
-    if (do_assert_hook) do_assert_hook();
-    if (toku_gdb_dump_on_assert) {
-        toku_try_gdb_stack_trace(nullptr);
-    }
+    
 
 #if TOKU_WINDOWS
     //Following commented methods will not always end the process (could hang).
@@ -186,6 +181,8 @@ toku_do_backtrace_abort(void) {
     TerminateProcess(GetCurrentProcess(), 134); //Only way found so far to unconditionally
     //Terminate the process
 #endif
+
+    if (do_assert_hook) do_assert_hook();
 
     abort();
 }

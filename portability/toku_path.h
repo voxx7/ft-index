@@ -101,6 +101,7 @@ const char *toku_test_filename(const char *default_filename);
 
 #define TOKU_PATH_MAX PATH_MAX
 
+char *stpncpy(char *dest, const char *src, size_t n);
 char *toku_path_join(char *dest, int n, const char *base, ...);
 // Effect:
 //  Concatenate all the parts into a filename, using portable path separators.

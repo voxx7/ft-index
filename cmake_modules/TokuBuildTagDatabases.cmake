@@ -44,7 +44,7 @@ if (USE_CTAGS AND
     add_custom_command(
       OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/tags"
       OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ctags-stamp"
-      COMMAND ${CTAGS} -o tags ${all_srcs} ${all_hdrs}
+      COMMAND ${CTAGS} -f tags ${all_srcs} ${all_hdrs}
       COMMAND touch "${CMAKE_CURRENT_BINARY_DIR}/ctags-stamp"
       DEPENDS ${all_srcs} ${all_hdrs} install_tdb_h generate_config_h generate_log_code
       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")

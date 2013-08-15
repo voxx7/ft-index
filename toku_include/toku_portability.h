@@ -208,19 +208,6 @@ typedef int64_t toku_off_t;
 
 #endif
 
-// Define some constants for Yama in case the build-machine's software is too old.
-#if !defined(HAVE_PR_SET_PTRACER)
-/*
- * Set specific pid that is allowed to ptrace the current task.
- * A value of 0 mean "no process".
- */
-// Well defined ("Yama" in ascii)
-#define PR_SET_PTRACER 0x59616d61
-#endif
-#if !defined(HAVE_PR_SET_PTRACER_ANY)
-#define PR_SET_PTRACER_ANY ((unsigned long)-1)
-#endif
-
 #if defined(__cplusplus)
 // decltype() here gives a reference-to-pointer instead of just a pointer,
 // just use __typeof__
@@ -237,7 +224,6 @@ typedef int64_t toku_off_t;
 #include "toku_os.h"
 #include "toku_htod.h"
 #include "toku_assert.h"
-#include "toku_crash.h"
 
 #define UU(x) x __attribute__((__unused__))
 
@@ -287,7 +273,7 @@ int      _dup2(int fd, int fd2)                     __attribute__((__deprecated_
 #undef strdup
 #    if defined(__FreeBSD__)
 char*    strdup(const char *)         __malloc_like __attribute__((__deprecated__));
-#    elif defined(__APPLE__)
+#    elif defined(__APPLE__) || defined(__sun)
 char*    strdup(const char *)         __attribute__((__deprecated__));
 #    else
 char*    strdup(const char *)         __THROW __attribute_malloc__ __nonnull ((1)) __attribute__((__deprecated__));
@@ -303,7 +289,7 @@ ssize_t  pwrite(int, const void *, size_t, off_t)   __attribute__((__deprecated_
 extern void *malloc(size_t)                    __malloc_like __attribute__((__deprecated__));
 extern void free(void*)                        __attribute__((__deprecated__));
 extern void *realloc(void*, size_t)            __malloc_like __attribute__((__deprecated__));
-#     elif defined(__APPLE__)
+#     elif defined(__APPLE__) || defined(__sun)
 extern void *malloc(size_t)                    __attribute__((__deprecated__));
 extern void free(void*)                        __attribute__((__deprecated__));
 extern void *realloc(void*, size_t)            __attribute__((__deprecated__));

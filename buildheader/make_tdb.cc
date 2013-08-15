@@ -205,6 +205,7 @@ enum {
         TOKUDB_CURSOR_CONTINUE         = -100014,
         TOKUDB_BAD_CHECKSUM            = -100015,
         TOKUDB_HUGE_PAGES_ENABLED      = -100016,
+        TOKUDB_OUT_OF_RANGE            = -100017,
         DONTUSE_I_JUST_PUT_THIS_HERE_SO_I_COULD_HAVE_A_COMMA_AFTER_EACH_ITEM
 };
 
@@ -356,6 +357,7 @@ static void print_defines (void) {
     dodefine(TOKUDB_CURSOR_CONTINUE);
     dodefine(TOKUDB_BAD_CHECKSUM);
     dodefine(TOKUDB_HUGE_PAGES_ENABLED);
+    dodefine(TOKUDB_OUT_OF_RANGE);
 
     /* LOADER flags */
     printf("/* LOADER flags */\n");
@@ -429,18 +431,18 @@ static void print_db_env_struct (void) {
                              "int (*create_indexer)                       (DB_ENV *env, DB_TXN *txn, DB_INDEXER **idxrp, DB *src_db, int N, DB *dbs[/*N*/], uint32_t db_flags[/*N*/], uint32_t indexer_flags)",
                              "int (*put_multiple)                         (DB_ENV *env, DB *src_db, DB_TXN *txn,\n"
                              "                                               const DBT *src_key, const DBT *src_val,\n"
-                             "                                               uint32_t num_dbs, DB **db_array, DBT *keys, DBT *vals, uint32_t *flags_array) /* insert into multiple DBs */",
+                             "                                               uint32_t num_dbs, DB **db_array, DBT_ARRAY *keys, DBT_ARRAY *vals, uint32_t *flags_array) /* insert into multiple DBs */",
                              "int (*set_generate_row_callback_for_put)    (DB_ENV *env, generate_row_for_put_func generate_row_for_put)",
                              "int (*del_multiple)                         (DB_ENV *env, DB *src_db, DB_TXN *txn,\n"
                              "                                               const DBT *src_key, const DBT *src_val,\n"
-                             "                                               uint32_t num_dbs, DB **db_array, DBT *keys, uint32_t *flags_array) /* delete from multiple DBs */",
+                             "                                               uint32_t num_dbs, DB **db_array, DBT_ARRAY *keys, uint32_t *flags_array) /* delete from multiple DBs */",
                              "int (*set_generate_row_callback_for_del)    (DB_ENV *env, generate_row_for_del_func generate_row_for_del)",
                              "int (*update_multiple)                      (DB_ENV *env, DB *src_db, DB_TXN *txn,\n"
                              "                                               DBT *old_src_key, DBT *old_src_data,\n"
                              "                                               DBT *new_src_key, DBT *new_src_data,\n"
                              "                                               uint32_t num_dbs, DB **db_array, uint32_t *flags_array,\n"
-                             "                                               uint32_t num_keys, DBT *keys,\n"
-                             "                                               uint32_t num_vals, DBT *vals) /* update multiple DBs */",
+                             "                                               uint32_t num_keys, DBT_ARRAY *keys,\n"
+                             "                                               uint32_t num_vals, DBT_ARRAY *vals) /* update multiple DBs */",
                              "int (*get_redzone)                          (DB_ENV *env, int *redzone) /* get the redzone limit */",
                              "int (*set_redzone)                          (DB_ENV *env, int redzone) /* set the redzone limit in percent of total space */",
                              "int (*set_lk_max_memory)                    (DB_ENV *env, uint64_t max)",
@@ -521,7 +523,7 @@ static void print_db_struct (void) {
 			 "int (*change_descriptor) (DB*, DB_TXN*, const DBT* descriptor, uint32_t) /* change row/dictionary descriptor for a db.  Available only while db is open */",
 			 "int (*getf_set)(DB*, DB_TXN*, uint32_t, DBT*, YDB_CALLBACK_FUNCTION, void*) /* same as DBC->c_getf_set without a persistent cursor) */",
 			 "int (*optimize)(DB*) /* Run garbage collecion and promote all transactions older than oldest. Amortized (happens during flattening) */",
-			 "int (*hot_optimize)(DB*, int (*progress_callback)(void *progress_extra, float progress), void *progress_extra)",
+			 "int (*hot_optimize)(DB*, DBT*, DBT*, int (*progress_callback)(void *progress_extra, float progress), void *progress_extra)",
 			 "int (*get_fragmentation)(DB*,TOKU_DB_FRAGMENTATION)",
 			 "int (*change_pagesize)(DB*,uint32_t)",
 			 "int (*change_readpagesize)(DB*,uint32_t)",
@@ -590,7 +592,8 @@ static void print_dbc_struct (void) {
 	"int (*c_getf_set)(DBC *, uint32_t, DBT *, YDB_CALLBACK_FUNCTION, void *)",
 	"int (*c_getf_set_range)(DBC *, uint32_t, DBT *, YDB_CALLBACK_FUNCTION, void *)",
 	"int (*c_getf_set_range_reverse)(DBC *, uint32_t, DBT *, YDB_CALLBACK_FUNCTION, void *)",
-	"int (*c_pre_acquire_range_lock)(DBC*, const DBT*, const DBT*)",
+	"int (*c_set_bounds)(DBC*, const DBT*, const DBT*, bool pre_acquire, int out_of_range_error)",
+	"void (*c_remove_restriction)(DBC*)",
 	NULL};
     sort_and_dump_fields("dbc", false, extra);
 }
@@ -744,8 +747,17 @@ int main (int argc, char *const argv[] __attribute__((__unused__))) {
     print_dbtype();
     print_defines();
 
-    printf("typedef int (*generate_row_for_put_func)(DB *dest_db, DB *src_db, DBT *dest_key, DBT *dest_val, const DBT *src_key, const DBT *src_val);\n");
-    printf("typedef int (*generate_row_for_del_func)(DB *dest_db, DB *src_db, DBT *dest_key, const DBT *src_key, const DBT *src_val);\n");
+    printf("typedef struct {\n");
+    printf("    uint32_t capacity;\n");
+    printf("    uint32_t size;\n");
+    printf("    DBT *dbts;\n");
+    printf("} DBT_ARRAY;\n\n");
+    printf("typedef int (*generate_row_for_put_func)(DB *dest_db, DB *src_db, DBT_ARRAY * dest_keys, DBT_ARRAY *dest_vals, const DBT *src_key, const DBT *src_val);\n");
+    printf("typedef int (*generate_row_for_del_func)(DB *dest_db, DB *src_db, DBT_ARRAY * dest_keys, const DBT *src_key, const DBT *src_val);\n");
+    printf("DBT_ARRAY * toku_dbt_array_init(DBT_ARRAY *dbts, uint32_t size) %s;\n", VISIBLE);
+    printf("void toku_dbt_array_destroy(DBT_ARRAY *dbts) %s;\n", VISIBLE);
+    printf("void toku_dbt_array_destroy_shallow(DBT_ARRAY *dbts) %s;\n", VISIBLE);
+    printf("void toku_dbt_array_resize(DBT_ARRAY *dbts, uint32_t size) %s;\n", VISIBLE);
 
     print_db_env_struct();
     print_db_key_range_struct();

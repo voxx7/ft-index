@@ -103,12 +103,16 @@ uint64_t eight_byte_desc = 0x12345678ffffffff;
 static int generate_row_for_put(
     DB *UU(dest_db), 
     DB *UU(src_db), 
-    DBT *dest_key, 
-    DBT *dest_val, 
+    DBT_ARRAY *dest_key_arrays, 
+    DBT_ARRAY *dest_val_arrays, 
     const DBT *src_key, 
     const DBT *src_val
     ) 
 {    
+    toku_dbt_array_resize(dest_key_arrays, 1);
+    toku_dbt_array_resize(dest_val_arrays, 1);
+    DBT *dest_key = &dest_key_arrays->dbts[0];
+    DBT *dest_val = &dest_val_arrays->dbts[0];
     dest_key->data = src_key->data;
     dest_key->size = src_key->size;
     dest_key->flags = 0;
@@ -196,10 +200,12 @@ static void do_inserts_and_queries(DB* db) {
         r = db->cursor(db, read_txn, &cursor, 0);
         CKERR(r);
         if (i == 0) { 
-            r = cursor->c_pre_acquire_range_lock(
+            r = cursor->c_set_bounds(
                 cursor,
                 db->dbt_neg_infty(),
-                db->dbt_pos_infty()
+                db->dbt_pos_infty(),
+                true,
+                0
                 );
             CKERR(r);
         }

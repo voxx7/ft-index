@@ -108,7 +108,6 @@ PATENT RIGHTS GRANT:
 // The secondary keys have the primary key appended to them.
 //
 
-static const int iibench_num_dbs = 4;
 static const size_t iibench_secondary_key_size = 16;
 
 struct iibench_row {
@@ -197,7 +196,7 @@ static int iibench_get_db_idx(DB *db) {
 
 static void iibench_rangequery_cb(DB *db, const DBT *key, const DBT *val, void *extra) {
     invariant_null(extra);
-    int db_idx = iibench_get_db_idx(db);
+    const int db_idx = iibench_get_db_idx(db);
     if (db_idx == 0) {
         struct iibench_row row;
         iibench_parse_row(key, val, &row);
@@ -214,23 +213,25 @@ struct iibench_put_op_extra {
 };
 
 static int UU() iibench_put_op(DB_TXN *txn, ARG arg, void *operation_extra, void *stats_extra) {
+    const int num_dbs = arg->cli->num_DBs;
     DB **dbs = arg->dbp;
     DB_ENV *env = arg->env;
-    DBT mult_key_dbt[iibench_num_dbs];
-    DBT mult_val_dbt[iibench_num_dbs];
-    uint32_t mult_put_flags[iibench_num_dbs];
-    memset(mult_key_dbt, 0, sizeof(mult_key_dbt));
-    memset(mult_val_dbt, 0, sizeof(mult_val_dbt));
+    DBT_ARRAY mult_key_dbt[num_dbs];
+    DBT_ARRAY mult_val_dbt[num_dbs];
+    uint32_t mult_put_flags[num_dbs];
 
     // The first index is unique with serial autoincrement keys.
     // The rest are have keys generated with this thread's random data.
     mult_put_flags[0] = get_put_flags(arg->cli) |
         // If the table was already created, don't check for uniqueness.
         (arg->cli->num_elements > 0 ? 0 : DB_NOOVERWRITE);
-    for (int i = 1; i < iibench_num_dbs; i++) {
-        mult_key_dbt[i].flags = DB_DBT_REALLOC;
+    for (int i = 0; i < num_dbs; i++) {
+        toku_dbt_array_init(&mult_key_dbt[i], 1);
+        toku_dbt_array_init(&mult_val_dbt[i], 1);
         mult_put_flags[i] = get_put_flags(arg->cli);
     }
+    mult_key_dbt[0].dbts[0].flags = 0;
+    mult_val_dbt[0].dbts[0].flags = 0;
 
     int r = 0;
 
@@ -247,16 +248,16 @@ static int UU() iibench_put_op(DB_TXN *txn, ARG arg, void *operation_extra, void
         int64_t valbuf[3];
         iibench_fill_key_buf(pk, keybuf);
         iibench_fill_val_buf(pk, valbuf);
-        dbt_init(&mult_key_dbt[0], keybuf, sizeof keybuf);
-        dbt_init(&mult_val_dbt[0], valbuf, sizeof valbuf);
+        dbt_init(&mult_key_dbt[0].dbts[0], keybuf, sizeof keybuf);
+        dbt_init(&mult_val_dbt[0].dbts[0], valbuf, sizeof valbuf);
 
         r = env->put_multiple(
             env, 
             dbs[0], // source db.
             txn, 
-            &mult_key_dbt[0], // source db key
-            &mult_val_dbt[0], // source db value
-            iibench_num_dbs, // total number of dbs
+            &mult_key_dbt[0].dbts[0], // source db key
+            &mult_val_dbt[0].dbts[0], // source db value
+            num_dbs, // total number of dbs
             dbs, // array of dbs
             mult_key_dbt, // array of keys
             mult_val_dbt, // array of values
@@ -273,13 +274,19 @@ static int UU() iibench_put_op(DB_TXN *txn, ARG arg, void *operation_extra, void
     }
 
 cleanup:
-    for (int i = 1; i < iibench_num_dbs; i++) {
-        toku_free(mult_key_dbt[i].data);
+    for (int i = 0; i < num_dbs; i++) {
+        toku_dbt_array_destroy(&mult_key_dbt[i]);
+        toku_dbt_array_destroy(&mult_val_dbt[i]);
     }
     return r;
 }
 
-static int iibench_generate_row_for_put(DB *dest_db, DB *src_db, DBT *dest_key, DBT *dest_val, const DBT *UU(src_key), const DBT *src_val) {
+static int iibench_generate_row_for_put(DB *dest_db, DB *src_db, DBT_ARRAY *dest_keys, DBT_ARRAY *dest_vals, const DBT *UU(src_key), const DBT *src_val) {
+    toku_dbt_array_resize(dest_keys, 1);
+    toku_dbt_array_resize(dest_vals, 1);
+    DBT *dest_key = &dest_keys->dbts[0];
+    DBT *dest_val = &dest_vals->dbts[0];
+
     invariant(src_db != dest_db);
     // 8 byte primary key, REALLOC secondary key
     invariant_notnull(src_key->data);
@@ -295,8 +302,7 @@ static int iibench_generate_row_for_put(DB *dest_db, DB *src_db, DBT *dest_key, 
     // so it has to be greater than zero (which would be the pk). Then
     // grab the appropriate secondary key from the source val, which is
     // an array of the 3 columns, so we have to subtract 1 from the index.
-    int db_idx = iibench_get_db_idx(dest_db);
-    invariant(db_idx > 0 && db_idx < 4);
+    const int db_idx = iibench_get_db_idx(dest_db);
     int64_t *CAST_FROM_VOIDP(columns, src_val->data);
     int64_t secondary_key = columns[db_idx - 1];
 
@@ -326,7 +332,7 @@ static DB *iibench_set_descriptor_after_db_opens(DB_ENV *env, DB *db, int idx, r
 }
 
 static int iibench_compare_keys(DB *db, const DBT *a, const DBT *b) {
-    int db_idx = iibench_get_db_idx(db);
+    const int db_idx = iibench_get_db_idx(db);
     if (db_idx == 0) {
         invariant(a->size == 8);
         invariant(b->size == 8);
@@ -376,7 +382,7 @@ static void iibench_rangequery_db(DB *db, DB_TXN *txn, ARG arg, uint64_t max_pk)
     dbt_init(&end_key, &end_k, 8);
 
     r = db->cursor(db, txn, &cursor, 0); CKERR(r);
-    r = cursor->c_pre_acquire_range_lock(cursor, &start_key, &end_key); CKERR(r);
+    r = cursor->c_set_bounds(cursor, &start_key, &end_key, true, 0); CKERR(r);
     struct rangequery_cb_extra extra = {
         .rows_read = 0,
         .limit = limit,
@@ -409,20 +415,21 @@ static int iibench_rangequery_op(DB_TXN *txn, ARG arg, void *operation_extra, vo
 }
 
 static int iibench_fill_tables(DB_ENV *env, DB **dbs, struct cli_args *cli_args, bool UU(fill_with_zeroes)) {
+    const int num_dbs = cli_args->num_DBs;
     int r = 0;
 
     DB_TXN *txn;
     r = env->txn_begin(env, 0, &txn, 0); CKERR(r);
 
     DB_LOADER *loader;
-    uint32_t db_flags[4];
-    uint32_t dbt_flags[4];
-    for (int i = 0; i < 4; i++) {
+    uint32_t db_flags[num_dbs];
+    uint32_t dbt_flags[num_dbs];
+    for (int i = 0; i < num_dbs; i++) {
         db_flags[i] = DB_PRELOCKED_WRITE;
         dbt_flags[i] = DB_DBT_REALLOC;
     }
 
-    r = env->create_loader(env, txn, &loader, dbs[0], 4, dbs, db_flags, dbt_flags, 0); CKERR(r);
+    r = env->create_loader(env, txn, &loader, dbs[0], num_dbs, dbs, db_flags, dbt_flags, 0); CKERR(r);
     for (int i = 0; i < cli_args->num_elements; i++) {
         DBT key, val;
         uint64_t pk = i;
@@ -433,6 +440,9 @@ static int iibench_fill_tables(DB_ENV *env, DB **dbs, struct cli_args *cli_args,
         dbt_init(&key, keybuf, sizeof keybuf);
         dbt_init(&val, valbuf, sizeof valbuf);
         r = loader->put(loader, &key, &val); CKERR(r);
+        if (verbose && i > 0 && i % 10000 == 0) {
+            report_overall_fill_table_progress(cli_args, 10000);
+        }
     }
     r = loader->close(loader); CKERR(r);
 
@@ -473,12 +483,12 @@ int test_main(int argc, char *const argv[]) {
     args.num_elements = 0;  // want to start with empty DBs
     // Puts per transaction is configurable. It defaults to 1k.
     args.txn_size = 1000;
-    // Default to one writer, no readers.
+    // Default to one writer on 4 indexes (pk + 3 secondaries), no readers.
+    args.num_DBs = 4;
     args.num_put_threads = 1;
     args.num_ptquery_threads = 0;
     parse_stress_test_args(argc, argv, &args);
-    // The index count and schema are not configurable. Silently ignore whatever was passed in.
-    args.num_DBs = 4;
+    // The schema is not configurable. Silently ignore whatever was passed in.
     args.key_size = 8;
     args.val_size = 32;
     // when there are multiple threads, its valid for two of them to

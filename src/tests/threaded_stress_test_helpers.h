@@ -137,8 +137,8 @@ typedef int (*operation_t)(DB_TXN *txn, ARG arg, void *operation_extra, void *st
 
 // TODO: Properly define these in db.h so we don't have to copy them here
 typedef int (*test_update_callback_f)(DB *, const DBT *key, const DBT *old_val, const DBT *extra, void (*set_val)(const DBT *new_val, void *set_extra), void *set_extra);
-typedef int (*test_generate_row_for_put_callback)(DB *dest_db, DB *src_db, DBT *dest_key, DBT *dest_data, const DBT *src_key, const DBT *src_data);
-typedef int (*test_generate_row_for_del_callback)(DB *dest_db, DB *src_db, DBT *dest_key, const DBT *src_key, const DBT *src_data);
+typedef int (*test_generate_row_for_put_callback)(DB *dest_db, DB *src_db, DBT_ARRAY *dest_keys, DBT_ARRAY *dest_vals, const DBT *src_key, const DBT *src_data);
+typedef int (*test_generate_row_for_del_callback)(DB *dest_db, DB *src_db, DBT_ARRAY *dest_keys, const DBT *src_key, const DBT *src_data);
 
 enum stress_lock_type {
     STRESS_LOCK_NONE = 0,
@@ -153,6 +153,7 @@ struct env_args {
     int checkpointing_period;
     int cleaner_period;
     int cleaner_iterations;
+    int sync_period;
     uint64_t lk_max_memory;
     uint64_t cachetable_size;
     uint32_t num_bucket_mutexes;
@@ -202,7 +203,7 @@ struct cli_args {
     bool blackhole; // all message injects are no-ops. helps measure txn/logging/locktree overhead.
     bool nolocktree; // use this flag to avoid the locktree on insertions
     bool unique_checks; // use uniqueness checking during insert. makes it slow.
-    bool nosync; // do not fsync on txn commit. useful for testing in memory performance.
+    uint32_t sync_period; // background log fsync period
     bool nolog; // do not log. useful for testing in memory performance.
     bool nocrashstatus; // do not print engine status upon crash
     bool prelock_updates; // update threads perform serial updates on a prelocked range
@@ -512,7 +513,7 @@ static int get_put_flags(struct cli_args *args) {
 
 static int get_commit_flags(struct cli_args *args) {
     int flags = 0;
-    flags |= args->nosync ? DB_TXN_NOSYNC : 0;
+    flags |= args->env_args.sync_period > 0 ? DB_TXN_NOSYNC : 0;
     return flags;
 }
 
@@ -666,7 +667,7 @@ static int scan_op_and_maybe_check_sum(
 
     { int chk_r = db->cursor(db, txn, &cursor, 0); CKERR(chk_r); }
     if (sce->prefetch) {
-        r = cursor->c_pre_acquire_range_lock(cursor, db->dbt_neg_infty(), db->dbt_pos_infty());
+        r = cursor->c_set_bounds(cursor, db->dbt_neg_infty(), db->dbt_pos_infty(), true, 0);
         assert(r == 0);
     }
     while (r != DB_NOTFOUND) {
@@ -696,20 +697,82 @@ static int scan_op_and_maybe_check_sum(
 }
 
 static int generate_row_for_put(
-    DB *UU(dest_db), 
-    DB *UU(src_db), 
-    DBT *dest_key, 
-    DBT *dest_val, 
-    const DBT *src_key, 
+    DB *dest_db,
+    DB *src_db,
+    DBT_ARRAY *dest_keys,
+    DBT_ARRAY *dest_vals,
+    const DBT *src_key,
     const DBT *src_val
-    ) 
-{    
-    dest_key->data = src_key->data;
-    dest_key->size = src_key->size;
-    dest_key->flags = 0;
-    dest_val->data = src_val->data;
-    dest_val->size = src_val->size;
-    dest_val->flags = 0;
+    )
+{
+    invariant(!src_db || src_db != dest_db);
+    invariant(src_key->size >= sizeof(unsigned int));
+
+    // Consistent pseudo random source.  Use checksum of key and val, and which db as seed
+    
+/*
+    struct x1764 l;
+    x1764_init(&l);
+    x1764_add(&l, src_key->data, src_key->size);
+    x1764_add(&l, src_val->data, src_val->size);
+    x1764_add(&l, &dest_db, sizeof(dest_db)); //make it depend on which db
+    unsigned int seed = x1764_finish(&l);
+    */
+    unsigned int seed = *(unsigned int*)src_key->data;
+
+    struct random_data random_data;
+    ZERO_STRUCT(random_data);
+    char random_buf[8];
+    {
+        int r = myinitstate_r(seed, random_buf, 8, &random_data);
+        assert_zero(r);
+    }
+
+    uint8_t num_outputs = 0;
+    while (myrandom_r(&random_data) % 2) {
+        num_outputs++;
+        if (num_outputs > 8) {
+            break;
+        }
+    }
+
+    toku_dbt_array_resize(dest_keys, num_outputs);
+    toku_dbt_array_resize(dest_vals, num_outputs);
+    int sum = 0;
+    for (uint8_t i = 0; i < num_outputs; i++) {
+        DBT *dest_key = &dest_keys->dbts[i];
+        DBT *dest_val = &dest_vals->dbts[i];
+
+        invariant(dest_key->flags == DB_DBT_REALLOC);
+        invariant(dest_val->flags == DB_DBT_REALLOC);
+
+        if (dest_key->ulen < src_key->size) {
+            dest_key->data = toku_xrealloc(dest_key->data, src_key->size);
+            dest_key->ulen = src_key->size;
+        }
+        dest_key->size = src_key->size;
+        if (dest_val->ulen < src_val->size) {
+            dest_val->data = toku_xrealloc(dest_val->data, src_val->size);
+            dest_val->ulen = src_val->size;
+        }
+        dest_val->size = src_val->size;
+        memcpy(dest_key->data, src_key->data, src_key->size);
+        ((uint8_t*)dest_key->data)[src_key->size-1] = i;  //Have different keys for each entry.
+
+        memcpy(dest_val->data, src_val->data, src_val->size);
+        invariant(dest_val->size >= sizeof(int));
+        int number;
+        if (i == num_outputs - 1) {
+            // Make sum add to 0
+            number = -sum;
+        } else {
+            // Keep track of sum
+            number = myrandom_r(&random_data);
+        }
+        sum += number;
+        *(int *) dest_val->data = number;
+    }
+    invariant(sum == 0);
     return 0;
 }
 
@@ -919,21 +982,34 @@ cleanup:
     return r;
 }
 
-static int UU() loader_op(DB_TXN* txn, ARG UU(arg), void* UU(operation_extra), void *UU(stats_extra)) {
+struct loader_op_extra {
+    struct scan_op_extra soe;
+    int num_dbs;
+};
+
+static int UU() loader_op(DB_TXN* txn, ARG arg, void* operation_extra, void *UU(stats_extra)) {
+    struct loader_op_extra* CAST_FROM_VOIDP(extra, operation_extra);
+    invariant(extra->num_dbs >= 1);
     DB_ENV* env = arg->env;
     int r;
     for (int num = 0; num < 2; num++) {
-        DB *db_load;
-        uint32_t db_flags = 0;
-        uint32_t dbt_flags = 0;
-        r = db_create(&db_load, env, 0);
-        assert(r == 0);
-        // TODO: Need to call before_db_open_hook() and after_db_open_hook()
-        r = db_load->open(db_load, txn, "loader-db", nullptr, DB_BTREE, DB_CREATE, 0666);
-        assert(r == 0);
+        DB *dbs_load[extra->num_dbs];
+        uint32_t db_flags[extra->num_dbs];
+        uint32_t dbt_flags[extra->num_dbs];
+        for (int i = 0; i < extra->num_dbs; ++i) {
+            db_flags[i] = 0;
+            dbt_flags[i] = 0;
+            r = db_create(&dbs_load[i], env, 0);
+            assert(r == 0);
+            char fname[100];
+            sprintf(fname, "loader-db-%d", i);
+            // TODO: Need to call before_db_open_hook() and after_db_open_hook()
+            r = dbs_load[i]->open(dbs_load[i], txn, fname, nullptr, DB_BTREE, DB_CREATE, 0666);
+            assert(r == 0);
+        }
         DB_LOADER *loader;
         uint32_t loader_flags = (num == 0) ? 0 : LOADER_COMPRESS_INTERMEDIATES;
-        r = env->create_loader(env, txn, &loader, db_load, 1, &db_load, &db_flags, &dbt_flags, loader_flags);
+        r = env->create_loader(env, txn, &loader, dbs_load[0], extra->num_dbs, dbs_load, db_flags, dbt_flags, loader_flags);
         CKERR(r);
 
         DBT key, val;
@@ -942,15 +1018,32 @@ static int UU() loader_op(DB_TXN* txn, ARG UU(arg), void* UU(operation_extra), v
         dbt_init(&key, keybuf, sizeof keybuf);
         dbt_init(&val, valbuf, sizeof valbuf);
 
-        for (int i = 0; i < 1000; i++) {
+        int sum = 0;
+        const int num_elements = 1000;
+        for (int i = 0; i < num_elements; i++) {
             fill_key_buf(i, keybuf, arg->cli);
             fill_val_buf_random(arg->random_data, valbuf, arg->cli);
+
+            assert(val.size >= sizeof(int));
+            if (i == num_elements - 1) {
+                // Make sum add to 0
+                *(int *) val.data = -sum;
+            } else {
+                // Keep track of sum
+                sum += *(int *) val.data;
+            }
             r = loader->put(loader, &key, &val); CKERR(r);
         }
 
         r = loader->close(loader); CKERR(r);
-        r = db_load->close(db_load, 0); CKERR(r);
-        r = env->dbremove(env, txn, "loader-db", nullptr, 0); CKERR(r);
+
+        for (int i = 0; i < extra->num_dbs; ++i) {
+            r = scan_op_and_maybe_check_sum(dbs_load[i], txn, &extra->soe, true); CKERR(r);
+            r = dbs_load[i]->close(dbs_load[i], 0); CKERR(r);
+            char fname[100];
+            sprintf(fname, "loader-db-%d", i);
+            r = env->dbremove(env, txn, fname, nullptr, 0); CKERR(r);
+        }
     }
     return 0;
 }
@@ -1016,7 +1109,7 @@ static int UU() verify_op(DB_TXN* UU(txn), ARG UU(arg), void* UU(operation_extra
     return r;
 }
 
-static int UU() scan_op(DB_TXN *txn, ARG UU(arg), void* operation_extra, void *UU(stats_extra)) {
+static int UU() scan_op(DB_TXN *txn, ARG arg, void* operation_extra, void *UU(stats_extra)) {
     struct scan_op_extra* CAST_FROM_VOIDP(extra, operation_extra);
     for (int i = 0; run_test && i < arg->cli->num_DBs; i++) {
         int r = scan_op_and_maybe_check_sum(arg->dbp[i], txn, extra, true);
@@ -1153,7 +1246,7 @@ static void rangequery_db(DB *db, DB_TXN *txn, ARG arg, rangequery_row_cb cb, vo
     fill_key_buf(start_k + limit, end_keybuf, arg->cli);
 
     r = db->cursor(db, txn, &cursor, 0); CKERR(r);
-    r = cursor->c_pre_acquire_range_lock(cursor, &start_key, &end_key); CKERR(r);
+    r = cursor->c_set_bounds(cursor, &start_key, &end_key, true, 0); CKERR(r);
 
     struct rangequery_cb_extra extra = {
         .rows_read = 0,
@@ -1322,7 +1415,7 @@ static int pre_acquire_write_lock(DB *db, DB_TXN *txn,
 
     r = db->cursor(db, txn, &cursor, DB_RMW);
     CKERR(r);
-    int cursor_r = cursor->c_pre_acquire_range_lock(cursor, left_key, right_key);
+    int cursor_r = cursor->c_set_bounds(cursor, left_key, right_key, true, 0);
     r = cursor->c_close(cursor);
     CKERR(r);
 
@@ -1527,7 +1620,7 @@ static int UU() hot_op(DB_TXN *UU(txn), ARG UU(arg), void* UU(operation_extra), 
     int r;
     for (int i = 0; run_test && i < arg->cli->num_DBs; i++) {
         DB* db = arg->dbp[i];
-        r = db->hot_optimize(db, hot_progress_callback, nullptr);
+        r = db->hot_optimize(db, NULL, NULL, hot_progress_callback, nullptr);
         if (run_test) {
             CKERR(r);
         }
@@ -1903,6 +1996,7 @@ static int create_tables(DB_ENV **env_res, DB **db_res, int num_DBs,
     r = env->checkpointing_set_period(env, env_args.checkpointing_period); CKERR(r);
     r = env->cleaner_set_period(env, env_args.cleaner_period); CKERR(r);
     r = env->cleaner_set_iterations(env, env_args.cleaner_iterations); CKERR(r);
+    env->change_fsync_log_period(env, env_args.sync_period);
     *env_res = env;
 
     for (int i = 0; i < num_DBs; i++) {
@@ -1996,9 +2090,8 @@ static void fill_single_table(DB_ENV *env, DB *db, struct cli_args *args, bool f
                 report_overall_fill_table_progress(args, puts_per_txn);
             }
             // begin a new txn if we're not using the loader,
-            // don't bother fsyncing to disk.
             if (loader == nullptr) {
-                r = txn->commit(txn, DB_TXN_NOSYNC); CKERR(r);
+                r = txn->commit(txn, 0); CKERR(r);
                 r = env->txn_begin(env, 0, &txn, 0); CKERR(r);
             }
         }
@@ -2101,6 +2194,7 @@ static int open_tables(DB_ENV **env_res, DB **db_res, int num_DBs,
     r = env->checkpointing_set_period(env, env_args.checkpointing_period); CKERR(r);
     r = env->cleaner_set_period(env, env_args.cleaner_period); CKERR(r);
     r = env->cleaner_set_iterations(env, env_args.cleaner_iterations); CKERR(r);
+    env->change_fsync_log_period(env, env_args.sync_period);
     *env_res = env;
 
     for (int i = 0; i < num_DBs; i++) {
@@ -2129,6 +2223,7 @@ static const struct env_args DEFAULT_ENV_ARGS = {
     .checkpointing_period = 10,
     .cleaner_period = 1,
     .cleaner_iterations = 1,
+    .sync_period = 0,
     .lk_max_memory = 1L * 1024 * 1024 * 1024,
     .cachetable_size = 300000,
     .num_bucket_mutexes = 1024,
@@ -2145,6 +2240,7 @@ static const struct env_args DEFAULT_PERF_ENV_ARGS = {
     .checkpointing_period = 60,
     .cleaner_period = 1,
     .cleaner_iterations = 5,
+    .sync_period = 0,
     .lk_max_memory = 1L * 1024 * 1024 * 1024,
     .cachetable_size = 1<<30,
     .num_bucket_mutexes = 1024 * 1024,
@@ -2188,7 +2284,7 @@ static struct cli_args UU() get_default_args(void) {
         .blackhole = false,
         .nolocktree = false,
         .unique_checks = false,
-        .nosync = false,
+        .sync_period = 0,
         .nolog = false,
         .nocrashstatus = false,
         .prelock_updates = false,
@@ -2539,6 +2635,7 @@ static inline void parse_stress_test_args (int argc, char *const argv[], struct 
         INT32_ARG_NONNEG("--checkpointing_period",    env_args.checkpointing_period, "s"),
         INT32_ARG_NONNEG("--cleaner_period",          env_args.cleaner_period,       "s"),
         INT32_ARG_NONNEG("--cleaner_iterations",      env_args.cleaner_iterations,   ""),
+        INT32_ARG_NONNEG("--sync_period",             env_args.sync_period,          "ms"),
         INT32_ARG_NONNEG("--update_broadcast_period", update_broadcast_period_ms,    "ms"),
         INT32_ARG_NONNEG("--num_ptquery_threads",     num_ptquery_threads,           " threads"),
         INT32_ARG_NONNEG("--num_put_threads",         num_put_threads,               " threads"),
@@ -2575,7 +2672,6 @@ static inline void parse_stress_test_args (int argc, char *const argv[], struct 
         BOOL_ARG("blackhole",                         blackhole),
         BOOL_ARG("nolocktree",                        nolocktree),
         BOOL_ARG("unique_checks",                     unique_checks),
-        BOOL_ARG("nosync",                            nosync),
         BOOL_ARG("nolog",                             nolog),
         BOOL_ARG("nocrashstatus",                     nocrashstatus),
         BOOL_ARG("prelock_updates",                   prelock_updates),

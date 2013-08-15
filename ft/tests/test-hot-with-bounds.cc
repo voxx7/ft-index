@@ -87,29 +87,154 @@ PATENT RIGHTS GRANT:
 
 #ident "Copyright (c) 2007-2013 Tokutek Inc.  All rights reserved."
 #ident "The technology is licensed by the Massachusetts Institute of Technology, Rutgers State University of New Jersey, and the Research Foundation of State University of New York at Stony Brook under United States of America Serial No. 11/760379 and to the patents and/or patent applications resulting from it."
+/* The goal of this test.  Make sure that inserts stay behind deletes. */
 
-#ifndef PORTABILITY_TOKU_PATH_H
-#define PORTABILITY_TOKU_PATH_H
 
-#include <stdarg.h>
-#include <limits.h>
+#include "test.h"
 
-__attribute__((nonnull))
-const char *toku_test_filename(const char *default_filename);
+#include <ft-cachetable-wrappers.h>
+#include "ft-flusher.h"
+#include "ft-flusher-internal.h"
+#include "checkpoint.h"
 
-#define TOKU_TEST_FILENAME toku_test_filename(__FILE__)
+static TOKUTXN const null_txn = 0;
+static DB * const null_db = 0;
 
-#define TOKU_PATH_MAX PATH_MAX
+enum { NODESIZE = 1024, KSIZE=NODESIZE-100, TOKU_PSIZE=20 };
 
-char *stpncpy(char *dest, const char *src, size_t n);
-char *toku_path_join(char *dest, int n, const char *base, ...);
-// Effect:
-//  Concatenate all the parts into a filename, using portable path separators.
-//  Store the result in dest.
-// Requires:
-//  dest is a buffer of size at least TOKU_PATH_MAX + 1.
-//  There are n path components, including base.
-// Returns:
-//  dest (useful for chaining function calls)
+static void
+doit (void) {
+    BLOCKNUM node_leaf[3];
+    BLOCKNUM node_root;
+    
+    CACHETABLE ct;
+    FT_HANDLE t;
 
-#endif // PORTABILITY_TOKU_PATH_H
+    int r;
+
+    toku_cachetable_create(&ct, 500*1024*1024, ZERO_LSN, NULL_LOGGER);
+    unlink(TOKU_TEST_FILENAME);
+    r = toku_open_ft_handle(TOKU_TEST_FILENAME, 1, &t, NODESIZE, NODESIZE/2, TOKU_DEFAULT_COMPRESSION_METHOD, ct, null_txn, toku_builtin_compare_fun);
+    assert(r==0);
+
+    toku_testsetup_initialize();  // must precede any other toku_testsetup calls
+
+    r = toku_testsetup_leaf(t, &node_leaf[0], 1, NULL, NULL);
+    assert(r==0);
+    r = toku_testsetup_leaf(t, &node_leaf[1], 1, NULL, NULL);
+    assert(r==0);
+    r = toku_testsetup_leaf(t, &node_leaf[2], 1, NULL, NULL);
+    assert(r==0);
+
+    int keylens[2];
+    keylens[0] = 2;
+    keylens[1] = 2;
+    char first[2];
+    first[0] = 'f';
+    first[1] = 0;
+    char second[2];
+    second[0] = 'p';
+    second[1] = 0;
+
+    char* keys[2];
+    keys[0] = first;
+    keys[1] = second;
+    r = toku_testsetup_nonleaf(t, 1, &node_root, 3, node_leaf, keys, keylens);
+    assert(r==0);
+
+    r = toku_testsetup_root(t, node_root);
+    assert(r==0);
+
+
+    r = toku_testsetup_insert_to_nonleaf(
+        t, 
+        node_root, 
+        FT_INSERT,
+        "a",
+        2,
+        NULL,
+        0
+        );
+    r = toku_testsetup_insert_to_nonleaf(
+        t, 
+        node_root, 
+        FT_INSERT,
+        "m",
+        2,
+        NULL,
+        0
+        );
+
+    r = toku_testsetup_insert_to_nonleaf(
+        t, 
+        node_root, 
+        FT_INSERT,
+        "z",
+        2,
+        NULL,
+        0
+        );
+
+
+    // at this point, we have inserted three messages into
+    // the root, one in each buffer, let's verify this.
+
+    FTNODE node = NULL;
+    struct ftnode_fetch_extra bfe;
+    fill_bfe_for_min_read(&bfe, t->ft);
+    toku_pin_ftnode_off_client_thread(
+        t->ft, 
+        node_root,
+        toku_cachetable_hash(t->ft->cf, node_root),
+        &bfe,
+        PL_WRITE_EXPENSIVE, 
+        0,
+        NULL,
+        &node
+        );
+    assert(node->height == 1);
+    assert(node->n_children == 3);
+    assert(toku_bnc_nbytesinbuf(BNC(node, 0)) > 0);
+    assert(toku_bnc_nbytesinbuf(BNC(node, 1)) > 0);
+    assert(toku_bnc_nbytesinbuf(BNC(node, 2)) > 0);
+    toku_unpin_ftnode(t->ft, node);
+
+    // now let's run a hot optimize, that should only flush the middle buffer
+    DBT left;
+    toku_fill_dbt(&left, "g", 2);
+    DBT right;
+    toku_fill_dbt(&right, "n", 2);
+    r = toku_ft_hot_optimize(t, &left, &right, NULL, NULL);
+    assert(r==0);
+
+    // at this point, we have should have flushed
+    // only the middle buffer, let's verify this.
+    node = NULL;
+    fill_bfe_for_min_read(&bfe, t->ft);
+    toku_pin_ftnode_off_client_thread(
+        t->ft, 
+        node_root,
+        toku_cachetable_hash(t->ft->cf, node_root),
+        &bfe,
+        PL_WRITE_EXPENSIVE, 
+        0,
+        NULL,
+        &node
+        );
+    assert(node->height == 1);
+    assert(node->n_children == 3);
+    assert(toku_bnc_nbytesinbuf(BNC(node, 0)) > 0);
+    assert(toku_bnc_nbytesinbuf(BNC(node, 1)) == 0);
+    assert(toku_bnc_nbytesinbuf(BNC(node, 2)) > 0);
+    toku_unpin_ftnode(t->ft, node);
+
+    r = toku_close_ft_handle_nolsn(t, 0);    assert(r==0);
+    toku_cachetable_close(&ct);
+}
+
+int
+test_main (int argc __attribute__((__unused__)), const char *argv[] __attribute__((__unused__))) {
+    default_parse_args(argc, argv);
+    doit();
+    return 0;
+}
